@@ -102,6 +102,12 @@ const COLORS = {
   metalDark: [60, 63, 66],
 };
 
+const ROOT_COLORS = [
+  [65, 42, 25],
+  [72, 48, 28],
+  [58, 38, 22],
+];
+
 // Ownership: each pixel remembers which plant (by id) drew it, as a stack
 // so removing a plant reveals the one behind it
 let nextPlantId = 1;
@@ -631,6 +637,55 @@ function seedRoots(plant) {
   }
 }
 
+function growRoots(p) {
+  if (!p.roots) return;
+  const id = p.id;
+
+  function extendTendril(tendril) {
+    if (tendril.connected || tendril.len >= tendril.maxLen) return;
+
+    if (Math.random() < 0.02) {
+      tendril.angle += (Math.random() - 0.5) * 0.4;
+
+      const nx = Math.round(tendril.x + Math.cos(tendril.angle));
+      const ny = Math.round(tendril.y + Math.sin(tendril.angle));
+
+      const localTerrain = (nx >= 0 && nx < W) ? terrain[nx] : p.ground;
+      if (nx < 0 || nx >= W || ny >= H || ny < localTerrain + 1 || ny > localTerrain + 12) return;
+
+      const col = ROOT_COLORS[Math.floor(Math.random() * ROOT_COLORS.length)];
+      setPixel(nx, ny, col, id);
+
+      tendril.x = nx;
+      tendril.y = ny;
+      tendril.len++;
+
+      if (tendril.depth < 2 && Math.random() < 0.08 && tendril.len > 2) {
+        const childAngle = tendril.angle + (Math.random() - 0.5) * 1.2;
+        const childMaxLen = 3 + Math.floor(Math.random() * 4);
+        tendril.children.push({
+          x: nx,
+          y: ny,
+          angle: childAngle,
+          len: 0,
+          maxLen: childMaxLen,
+          depth: tendril.depth + 1,
+          children: [],
+          connected: false,
+        });
+      }
+    }
+
+    for (const child of tendril.children) {
+      extendTendril(child);
+    }
+  }
+
+  for (const root of p.roots) {
+    extendTendril(root);
+  }
+}
+
 function pickType() {
   const r = Math.random();
   if (r < 0.15) return 'flower';
@@ -1082,6 +1137,8 @@ function growTree(p) {
       if (p.canopyRadius >= p.canopySize) p.done = true;
     }
   }
+
+  growRoots(p);
 }
 
 // Fallen logs that plants can grow on
