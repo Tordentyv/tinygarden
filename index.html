@@ -1576,6 +1576,59 @@ function spawnBird() {
   animals.push({ type: 'bird', x, y, dir, life: 60 + Math.floor(Math.random() * 80), nesting: false, nestTimer: 0 });
 }
 
+function spawnMonkey() {
+  const matureTrees = plants.filter(p => p.type === 'tree' && p.done);
+  if (matureTrees.length < 10) return;
+
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const startX = dir === 1 ? -5 : W + 5;
+
+  const sorted = matureTrees
+    .filter(t => dir === 1 ? t.x > 0 : t.x < W)
+    .sort((a, b) => dir === 1 ? a.x - b.x : b.x - a.x);
+
+  if (sorted.length < 3) return;
+
+  const firstTree = sorted[0];
+  const gripX = firstTree.x;
+  const gripY = firstTree.ground - firstTree.height;
+
+  animals.push({
+    type: 'monkey',
+    x: startX,
+    y: gripY,
+    dir,
+    state: 'swinging',
+    gripX: startX,
+    gripY: gripY,
+    nextGripX: gripX,
+    nextGripY: gripY,
+    swingFrame: 0,
+    swingTotal: 10,
+    pauseTimer: 0,
+    life: 9999,
+  });
+}
+
+function findNextGrip(monkey) {
+  const matureTrees = plants.filter(p => p.type === 'tree' && p.done);
+  const dir = monkey.dir;
+  const cx = monkey.nextGripX;
+
+  for (const range of [60, 100]) {
+    const candidates = matureTrees.filter(t => {
+      const dx = (t.x - cx) * dir;
+      return dx > 5 && dx <= range;
+    });
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => (a.x - cx) * dir - (b.x - cx) * dir);
+      const tree = candidates[0];
+      return { x: tree.x, y: tree.ground - tree.height };
+    }
+  }
+  return null;
+}
+
 function drawMouse(m) {
   setOverlay(m.x, m.y, [160, 120, 80]);
   setOverlay(m.x - m.dir, m.y, [160, 120, 80]);
@@ -1586,6 +1639,26 @@ function drawBird(b) {
   setOverlay(b.x, b.y, [60, 60, 180]);
   setOverlay(b.x - 1, b.y - 1, [60, 60, 180]);
   setOverlay(b.x + 1, b.y - 1, [60, 60, 180]);
+}
+
+function drawMonkey(m) {
+  const body = [140, 90, 40];
+  const tail = [110, 70, 30];
+
+  if (m.state === 'swinging') {
+    setOverlay(m.x, m.y, body);
+    setOverlay(m.x + m.dir, m.y, body);
+    const armDx = -m.dir;
+    setOverlay(m.x + armDx, m.y - 1, body);
+    setOverlay(m.x - m.dir, m.y + 1, tail);
+    setOverlay(m.x - m.dir * 2, m.y + 2, tail);
+  } else {
+    setOverlay(m.x, m.y, body);
+    setOverlay(m.x, m.y + 1, body);
+    setOverlay(m.x, m.y - 1, body);
+    setOverlay(m.x + 1, m.y + 2, tail);
+    setOverlay(m.x + 1, m.y + 3, tail);
+  }
 }
 
 function findTreeWithCanopy() {
@@ -1607,6 +1680,7 @@ function buildNest(tree) {
 function updateAnimals() {
   if (Math.random() < 0.04 && animals.filter(a => a.type === 'mouse').length < 3) spawnMouse();
   if (Math.random() < 0.03 && animals.filter(a => a.type === 'bird').length < 4) spawnBird();
+  if (Math.random() < 0.01 && animals.filter(a => a.type === 'monkey').length < 2) spawnMonkey();
 
   clearOverlay();
   updateWeather();
@@ -1653,6 +1727,54 @@ function updateAnimals() {
           }
         }
         drawBird(a);
+      }
+    } else if (a.type === 'monkey') {
+      if (a.state === 'swinging') {
+        a.swingFrame++;
+        const progress = a.swingFrame / a.swingTotal;
+
+        if (progress >= 1) {
+          a.x = a.nextGripX;
+          a.y = a.nextGripY;
+          a.gripX = a.nextGripX;
+          a.gripY = a.nextGripY;
+          a.state = 'gripping';
+          a.pauseTimer = 3 + Math.floor(Math.random() * 3);
+        } else {
+          const startX = a.gripX;
+          const startY = a.gripY;
+          const endX = a.nextGripX;
+          const endY = a.nextGripY;
+          const dist = Math.abs(endX - startX);
+          const sag = Math.min(15, dist * 0.4);
+
+          a.x = Math.round(startX + (endX - startX) * progress);
+          a.y = Math.round(startY + (endY - startY) * progress + sag * Math.sin(Math.PI * progress));
+        }
+        drawMonkey(a);
+
+      } else if (a.state === 'gripping') {
+        a.pauseTimer--;
+        if (a.pauseTimer <= 0) {
+          const next = findNextGrip(a);
+          if (next) {
+            a.state = 'swinging';
+            a.swingFrame = 0;
+            a.nextGripX = next.x;
+            a.nextGripY = next.y;
+            const dist = Math.abs(next.x - a.gripX);
+            a.swingTotal = Math.max(8, Math.min(12, Math.round(dist / 6)));
+          } else {
+            animals.splice(i, 1);
+            continue;
+          }
+        }
+        drawMonkey(a);
+      }
+
+      if ((a.dir === 1 && a.x > W + 5) || (a.dir === -1 && a.x < -5)) {
+        animals.splice(i, 1);
+        continue;
       }
     }
   }
