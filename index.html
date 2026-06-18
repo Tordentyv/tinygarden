@@ -660,6 +660,23 @@ function growRoots(p) {
       tendril.y = ny;
       tendril.len++;
 
+      for (const other of plants) {
+        if (other === p || other.type !== 'tree' || !other.roots) continue;
+        if (Math.abs(other.x - p.x) > 30) continue;
+        const otherTips = collectRootTips(other);
+        for (const tip of otherTips) {
+          const dx = nx - tip.x;
+          const dy = ny - tip.y;
+          if (dx * dx + dy * dy <= 9) {
+            tendril.angle = Math.atan2(tip.y - ny, tip.x - nx);
+            if (dx * dx + dy * dy <= 2) {
+              tendril.connected = true;
+            }
+            return;
+          }
+        }
+      }
+
       if (tendril.depth < 2 && Math.random() < 0.08 && tendril.len > 2) {
         const childAngle = tendril.angle + (Math.random() - 0.5) * 1.2;
         const childMaxLen = 3 + Math.floor(Math.random() * 4);
@@ -684,6 +701,19 @@ function growRoots(p) {
   for (const root of p.roots) {
     extendTendril(root);
   }
+}
+
+function collectRootTips(p) {
+  if (!p.roots) return [];
+  const tips = [];
+  function collect(tendril) {
+    if (tendril.len > 0) {
+      tips.push({ x: tendril.x, y: tendril.y, id: p.id });
+    }
+    for (const child of tendril.children) collect(child);
+  }
+  for (const root of p.roots) collect(root);
+  return tips;
 }
 
 function pickType() {
