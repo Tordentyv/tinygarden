@@ -612,6 +612,25 @@ baseLayer.set(pixels);
 
 const plants = [];
 
+function seedRoots(plant) {
+  plant.roots = [];
+  const numTendrils = 2 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < numTendrils; i++) {
+    const angle = (100 + Math.random() * 160) * Math.PI / 180;
+    const maxLen = 6 + Math.floor(Math.random() * 7);
+    plant.roots.push({
+      x: plant.x,
+      y: plant.ground,
+      angle,
+      len: 0,
+      maxLen,
+      depth: 0,
+      children: [],
+      connected: false,
+    });
+  }
+}
+
 function pickType() {
   const r = Math.random();
   if (r < 0.15) return 'flower';
@@ -659,33 +678,43 @@ function growNewPlant() {
       break;
     case 'oak':
       plants.push({ ...base, type: 'tree', treeType: 'oak', maxHeight: 55 + Math.floor(Math.random() * 80), canopySize: 8 + Math.floor(Math.random() * 10), canopyShape: ['wide','spreading','round','asymmetric'][Math.floor(Math.random()*4)], growRate: 0.07 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'pine':
       plants.push({ ...base, type: 'tree', treeType: 'pine', maxHeight: 50 + Math.floor(Math.random() * 70), canopySize: 0, canopyShape: 'round', growRate: 0.08 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'birch':
       plants.push({ ...base, type: 'tree', treeType: 'birch', maxHeight: 40 + Math.floor(Math.random() * 50), canopySize: 6 + Math.floor(Math.random() * 6), canopyShape: ['wide','round','asymmetric'][Math.floor(Math.random()*3)], growRate: 0.1 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'willow':
       plants.push({ ...base, type: 'tree', treeType: 'willow', maxHeight: 45 + Math.floor(Math.random() * 60), canopySize: 8 + Math.floor(Math.random() * 6), canopyShape: 'spreading', growRate: 0.06 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'cherry':
       plants.push({ ...base, type: 'tree', treeType: 'cherry', maxHeight: 30 + Math.floor(Math.random() * 40), canopySize: 6 + Math.floor(Math.random() * 6), canopyShape: ['wide','round','spreading'][Math.floor(Math.random()*3)], growRate: 0.09 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'maple':
       plants.push({ ...base, type: 'tree', treeType: 'maple', maxHeight: 50 + Math.floor(Math.random() * 65), canopySize: 8 + Math.floor(Math.random() * 8), canopyShape: ['wide','spreading','round','asymmetric'][Math.floor(Math.random()*4)], growRate: 0.07 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'cypress':
       plants.push({ ...base, type: 'tree', treeType: 'cypress', maxHeight: 60 + Math.floor(Math.random() * 80), canopySize: 3, canopyShape: 'round', growRate: 0.06 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'palm':
       plants.push({ ...base, type: 'tree', treeType: 'palm', maxHeight: 40 + Math.floor(Math.random() * 45), canopySize: 6 + Math.floor(Math.random() * 4), canopyShape: 'spreading', growRate: 0.1 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'baobab':
       plants.push({ ...base, type: 'tree', treeType: 'baobab', maxHeight: 30 + Math.floor(Math.random() * 30), canopySize: 10 + Math.floor(Math.random() * 8), canopyShape: 'spreading', growRate: 0.04 });
+      seedRoots(plants[plants.length - 1]);
       break;
     case 'juniper':
       plants.push({ ...base, type: 'tree', treeType: 'juniper', maxHeight: 25 + Math.floor(Math.random() * 30), canopySize: 5 + Math.floor(Math.random() * 5), canopyShape: ['round','wide'][Math.floor(Math.random()*2)], growRate: 0.11 });
+      seedRoots(plants[plants.length - 1]);
       break;
   }
 }
