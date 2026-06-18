@@ -1,0 +1,2102 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pixel Garden</title>
+<style>
+  body { margin: 0; background: #1a1a2e; display: flex; align-items: center; justify-content: center; height: 100vh; }
+  .wrap { position: relative; }
+  canvas { image-rendering: pixelated; border: 2px solid #333; display: block; }
+  .speed, .weather-btns { position: absolute; display: flex; gap: 3px; }
+  .speed { top: 6px; right: 6px; }
+  .weather-btns { top: 6px; left: 6px; }
+  .speed button, .weather-btns button, .music-btn button, .sfx-btn button { background: rgba(0,0,0,0.5); color: #ccc; border: 1px solid #555; border-radius: 3px; padding: 2px 5px; font: 10px monospace; cursor: pointer; }
+  .speed button.active, .weather-btns button.active, .music-btn button.active { background: rgba(100,180,255,0.4); color: #fff; border-color: #8cf; }
+  .music-btn { position: absolute; bottom: 6px; right: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<canvas id="g" width="384" height="240"></canvas>
+<div class="weather-btns">
+  <button data-weather="clear" class="active">☀</button>
+  <button data-weather="cloudy">☁</button>
+  <button data-weather="rain">🌧</button>
+  <button data-weather="storm">⛈</button>
+  <button id="flockBtn">V</button>
+</div>
+<div class="music-btn">
+  <button id="musicToggle">♪</button>
+</div>
+<div class="speed">
+  <button data-speed="1" class="active">1x</button>
+  <button data-speed="1.5">1.5x</button>
+  <button data-speed="2">2x</button>
+  <button data-speed="5">5x</button>
+  <button data-speed="10">10x</button>
+</div>
+</div>
+<script>
+const canvas = document.getElementById('g');
+const ctx = canvas.getContext('2d');
+canvas.style.width = '1152px';
+canvas.style.height = '720px';
+
+const W = 384, H = 240;
+const ground = H - 18;
+const pixels = new Uint8Array(W * H * 3);
+
+const COLORS = {
+  sky: [26, 26, 46],
+  dirt: [80, 50, 30],
+  grass: [34, 120, 50],
+  stem: [40, 140, 40],
+  leaf: [60, 180, 60],
+  darkLeaf: [30, 100, 30],
+  trunk: [90, 60, 30],
+  darkTrunk: [70, 45, 20],
+  birchTrunk: [200, 200, 190],
+  birchDark: [60, 60, 55],
+  pineNeedle: [20, 80, 30],
+  pineDark: [10, 50, 20],
+  willow: [80, 180, 60],
+  willowDark: [50, 130, 40],
+  cherry: [255, 140, 160],
+  cherryDark: [220, 100, 120],
+  maple: [200, 60, 30],
+  mapleDark: [160, 40, 20],
+  mapleGreen: [60, 160, 50],
+  cypress: [25, 70, 35],
+  cypressDark: [15, 50, 25],
+  palm: [100, 180, 60],
+  palmTrunk: [140, 110, 60],
+  baobab: [120, 90, 50],
+  baobabDark: [90, 65, 35],
+  juniper: [40, 100, 60],
+  juniperBerry: [50, 50, 120],
+  bush: [40, 150, 50],
+  mushCap: [180, 50, 50],
+  mushSpot: [255, 255, 220],
+  mushStem: [220, 210, 180],
+  flower: [[220, 80, 80], [220, 180, 50], [180, 80, 220], [80, 160, 220], [255, 150, 100]],
+  cactus: [60, 140, 60],
+  cactusLight: [80, 170, 80],
+  fern: [40, 130, 50],
+  fernLight: [60, 160, 60],
+  vine: [50, 160, 50],
+  berry: [180, 30, 60],
+  rock: [100, 100, 105],
+  rockDark: [70, 70, 75],
+  rockLight: [130, 130, 135],
+  moss: [60, 120, 40],
+  lichen: [140, 150, 80],
+  concrete: [140, 135, 130],
+  concreteDark: [100, 95, 90],
+  concreteShadow: [70, 65, 60],
+  rebar: [120, 60, 40],
+  glass: [120, 160, 180],
+  glassBroken: [80, 120, 140],
+  rust: [150, 80, 40],
+  metal: [90, 95, 100],
+  metalLight: [120, 125, 130],
+  metalDark: [60, 63, 66],
+};
+
+// Ownership: each pixel remembers which plant (by id) drew it, as a stack
+// so removing a plant reveals the one behind it
+let nextPlantId = 1;
+const pixelOwners = new Array(W * H).fill(null); // each cell: [{id, color}...] stack or null
+const baseLayer = new Uint8Array(W * H * 3); // terrain/sky base
+
+function setPixel(x, y, color, plantId) {
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  const i = (y * W + x) * 3;
+  pixels[i] = color[0]; pixels[i+1] = color[1]; pixels[i+2] = color[2];
+  if (plantId) {
+    const pi = y * W + x;
+    if (!pixelOwners[pi]) pixelOwners[pi] = [];
+    // Remove any existing entry for this plant at this pixel
+    const stack = pixelOwners[pi];
+    for (let s = stack.length - 1; s >= 0; s--) {
+      if (stack[s].id === plantId) { stack.splice(s, 1); break; }
+    }
+    stack.push({ id: plantId, color: [color[0], color[1], color[2]] });
+  }
+}
+
+function removePlantPixels(plantId) {
+  for (let pi = 0; pi < W * H; pi++) {
+    const stack = pixelOwners[pi];
+    if (!stack) continue;
+    let found = false;
+    for (let s = stack.length - 1; s >= 0; s--) {
+      if (stack[s].id === plantId) {
+        stack.splice(s, 1);
+        found = true;
+        break;
+      }
+    }
+    if (found) {
+      const i = pi * 3;
+      if (stack.length > 0) {
+        // Reveal the plant below
+        const below = stack[stack.length - 1].color;
+        pixels[i] = below[0]; pixels[i+1] = below[1]; pixels[i+2] = below[2];
+      } else {
+        // Restore base terrain
+        pixels[i] = baseLayer[i]; pixels[i+1] = baseLayer[i+1]; pixels[i+2] = baseLayer[i+2];
+      }
+    }
+  }
+}
+
+function getPixel(x, y) {
+  const i = (y * W + x) * 3;
+  return [pixels[i], pixels[i+1], pixels[i+2]];
+}
+
+function isEmpty(x, y) {
+  const p = getPixel(x, y);
+  return p[0] === COLORS.sky[0] && p[1] === COLORS.sky[1] && p[2] === COLORS.sky[2];
+}
+
+// Generate terrain with gentle slopes
+const terrain = new Array(W);
+let terrainY = ground;
+for (let x = 0; x < W; x++) {
+  if (Math.random() < 0.15) terrainY += Math.random() < 0.5 ? -1 : 1;
+  terrainY = Math.max(ground - 3, Math.min(ground + 2, terrainY));
+  terrain[x] = terrainY;
+}
+// Smooth pass
+for (let i = 1; i < W - 1; i++) {
+  terrain[i] = Math.round((terrain[i - 1] + terrain[i] + terrain[i + 1]) / 3);
+}
+
+// Draw sky and ground with earth texture
+for (let x = 0; x < W; x++) {
+  for (let y = 0; y < H; y++) {
+    if (y < terrain[x]) {
+      setPixel(x, y, COLORS.sky);
+    } else if (y === terrain[x]) {
+      // Grass with subtle variation
+      const gv = Math.random();
+      if (gv < 0.7) setPixel(x, y, COLORS.grass);
+      else if (gv < 0.85) setPixel(x, y, [28, 105, 42]);
+      else setPixel(x, y, [40, 135, 55]);
+    } else {
+      // Dirt with texture: pebbles, darker veins, root-like streaks
+      const depth = y - terrain[x];
+      const r = Math.random();
+      if (r < 0.03) {
+        // Small pebbles
+        setPixel(x, y, [95, 85, 70]);
+      } else if (r < 0.06 && depth < 4) {
+        // Dark topsoil patches
+        setPixel(x, y, [55, 35, 20]);
+      } else if (r < 0.08 && depth > 3) {
+        // Lighter clay spots deeper down
+        setPixel(x, y, [100, 65, 40]);
+      } else if (r < 0.1) {
+        // Darker earth variation
+        setPixel(x, y, [65, 40, 22]);
+      } else {
+        setPixel(x, y, COLORS.dirt);
+      }
+    }
+  }
+}
+
+// Buried rocks in the dirt
+const numBuriedRocks = 5 + Math.floor(Math.random() * 6);
+for (let i = 0; i < numBuriedRocks; i++) {
+  const rx = 10 + Math.floor(Math.random() * (W - 20));
+  const depth = 3 + Math.floor(Math.random() * 10);
+  const ry = terrain[rx] + depth;
+  const rw = 2 + Math.floor(Math.random() * 4);
+  const rh = 2 + Math.floor(Math.random() * 3);
+  if (ry + rh >= H) continue;
+  for (let dx = 0; dx < rw; dx++) {
+    for (let dy = 0; dy < rh; dy++) {
+      const px = rx + dx, py = ry + dy;
+      if (px >= W) continue;
+      const edge = dx === 0 || dx === rw - 1 || dy === 0 || dy === rh - 1;
+      setPixel(px, py, edge ? [70, 65, 55] : [90, 85, 75]);
+    }
+  }
+}
+
+// Buried dinosaur skeleton
+const dinoX = 40 + Math.floor(Math.random() * (W - 100));
+const dinoDepth = 5 + Math.floor(Math.random() * 6);
+const dinoY = terrain[dinoX] + dinoDepth;
+const bone = [210, 200, 180];
+const boneDark = [170, 160, 140];
+if (dinoY + 8 < H) {
+  // Spine (horizontal)
+  const spineLen = 18 + Math.floor(Math.random() * 8);
+  for (let i = 0; i < spineLen; i++) {
+    const px = dinoX + i;
+    if (px < W) setPixel(px, dinoY, bone);
+  }
+  // Ribs (hanging down from spine)
+  for (let i = 3; i < spineLen - 4; i += 2) {
+    const ribLen = 2 + Math.floor(Math.random() * 3);
+    for (let r = 1; r <= ribLen; r++) {
+      const px = dinoX + i;
+      if (px < W && dinoY + r < H) setPixel(px, dinoY + r, boneDark);
+    }
+  }
+  // Skull (at one end)
+  const skullX = dinoX - 1;
+  if (skullX >= 0 && skullX + 3 < W && dinoY - 2 >= 0) {
+    setPixel(skullX, dinoY, bone);
+    setPixel(skullX - 1, dinoY, bone);
+    setPixel(skullX, dinoY - 1, bone);
+    setPixel(skullX + 1, dinoY - 1, bone);
+    setPixel(skullX - 1, dinoY - 1, bone);
+    setPixel(skullX, dinoY - 2, bone);
+    setPixel(skullX - 1, dinoY - 2, boneDark);
+    // Eye socket
+    setPixel(skullX, dinoY - 1, COLORS.dirt);
+    // Jaw
+    setPixel(skullX - 1, dinoY + 1, boneDark);
+    setPixel(skullX - 2, dinoY + 1, boneDark);
+    // Teeth
+    setPixel(skullX - 2, dinoY, bone);
+  }
+  // Tail (tapering)
+  const tailStart = dinoX + spineLen;
+  for (let i = 0; i < 7; i++) {
+    const px = tailStart + i;
+    if (px < W) setPixel(px, dinoY - Math.floor(i * 0.3), boneDark);
+  }
+  // Legs (two pairs)
+  for (const legX of [dinoX + 5, dinoX + spineLen - 5]) {
+    if (legX < W) {
+      for (let l = 1; l <= 3; l++) {
+        if (dinoY + l < H) setPixel(legX, dinoY + l, bone);
+      }
+      if (dinoY + 4 < H && legX + 1 < W) {
+        setPixel(legX + 1, dinoY + 4, boneDark);
+      }
+    }
+  }
+}
+
+// Place rocks
+const rocks = [];
+const numRocks = 10 + Math.floor(Math.random() * 10);
+for (let r = 0; r < numRocks; r++) {
+  const rx = 4 + Math.floor(Math.random() * (W - 8));
+  const rw = 2 + Math.floor(Math.random() * 3);
+  const rh = 1 + Math.floor(Math.random() * 3);
+  const ry = terrain[rx] - rh;
+  rocks.push({ x: rx, y: ry, w: rw, h: rh, mossCoverage: 0 });
+  for (let dx = 0; dx < rw; dx++) {
+    for (let dy = 0; dy < rh; dy++) {
+      const shade = (dy === 0) ? COLORS.rockLight : (dx === 0 || dx === rw - 1) ? COLORS.rockDark : COLORS.rock;
+      setPixel(rx + dx, ry + dy, shade);
+    }
+  }
+}
+
+// Place larger rocks and rubble
+const numLargeRocks = 3 + Math.floor(Math.random() * 4);
+for (let r = 0; r < numLargeRocks; r++) {
+  const rx = 10 + Math.floor(Math.random() * (W - 20));
+  const rw = 5 + Math.floor(Math.random() * 6);
+  const rh = 3 + Math.floor(Math.random() * 4);
+  const ry = terrain[rx] - rh;
+  rocks.push({ x: rx, y: ry, w: rw, h: rh, mossCoverage: 0 });
+  for (let dx = 0; dx < rw; dx++) {
+    for (let dy = 0; dy < rh; dy++) {
+      const edge = dx === 0 || dx === rw - 1 || dy === rh - 1;
+      const top = dy === 0;
+      const col = top ? COLORS.rockLight : edge ? COLORS.rockDark : COLORS.rock;
+      setPixel(rx + dx, ry + dy, col);
+    }
+  }
+  // Rubble scatter around large rocks
+  for (let i = 0; i < 3 + Math.floor(Math.random() * 4); i++) {
+    const sx = rx + Math.floor(Math.random() * (rw + 4)) - 2;
+    const sy = terrain[Math.max(0, Math.min(sx, W - 1))] - 1;
+    if (sx >= 0 && sx < W) {
+      setPixel(sx, sy, Math.random() < 0.5 ? COLORS.rock : COLORS.rockDark);
+    }
+  }
+}
+
+// Place rusted car wrecks
+const cars = [];
+const numCars = 2 + Math.floor(Math.random() * 3);
+for (let c = 0; c < numCars; c++) {
+  const cx = 15 + Math.floor(Math.random() * (W - 30));
+  const cw = 12 + Math.floor(Math.random() * 6);
+  const ch = 5 + Math.floor(Math.random() * 3);
+  const cy = terrain[cx] - ch;
+  const tilt = Math.random() < 0.3 ? (Math.random() < 0.5 ? -1 : 1) : 0;
+  const car = { x: cx, y: cy, w: cw, h: ch, mossCoverage: 0, maxMoss: cw * ch, pixels: [] };
+
+  for (let dx = 0; dx < cw; dx++) {
+    const tiltOff = Math.round(tilt * dx * 0.15);
+    for (let dy = 0; dy < ch; dy++) {
+      const px = cx + dx, py = cy + dy + tiltOff;
+      if (px < 0 || px >= W || py < 0 || py >= H) continue;
+
+      let col;
+      // Cabin windows (upper middle section)
+      if (dy < ch - 2 && dx > 2 && dx < cw - 2 && dy > 0) {
+        col = Math.random() < 0.6 ? COLORS.glassBroken : COLORS.glass;
+      }
+      // Wheels
+      else if (dy === ch - 1 && (dx === 1 || dx === 2 || dx === cw - 2 || dx === cw - 3)) {
+        col = COLORS.metalDark;
+      }
+      // Body
+      else {
+        const r = Math.random();
+        if (r < 0.4) col = COLORS.rust;
+        else if (r < 0.7) col = COLORS.metal;
+        else col = COLORS.metalDark;
+      }
+      setPixel(px, py, col);
+      car.pixels.push({ x: px, y: py });
+    }
+  }
+
+  // Broken bumper / debris
+  for (let i = 0; i < 2 + Math.floor(Math.random() * 3); i++) {
+    const bx = cx + cw + Math.floor(Math.random() * 3);
+    const by = terrain[Math.max(0, Math.min(bx, W - 1))] - 1;
+    if (bx < W) {
+      setPixel(bx, by, COLORS.rust);
+      car.pixels.push({ x: bx, y: by });
+    }
+  }
+
+  cars.push(car);
+}
+
+// Generate ruined city in background
+const ruins = [];
+
+function drawBuilding(bx, bw, bh, style) {
+  const by = terrain[bx] - 1;
+  const ruin = { x: bx, y: by - bh, w: bw, h: bh, mossCoverage: 0, maxMoss: bw * bh };
+
+  for (let dx = 0; dx < bw; dx++) {
+    for (let dy = 0; dy < bh; dy++) {
+      const px = bx + dx, py = by - dy;
+      if (px >= W || px < 0 || py < 0) continue;
+
+      if (style === 'skyscraper') {
+        // Edges darker
+        if (dx === 0 || dx === bw - 1) {
+          setPixel(px, py, COLORS.concreteDark);
+        } else if (dy % 5 === 0 && dx > 1 && dx < bw - 2) {
+          // Window rows
+          setPixel(px, py, Math.random() < 0.4 ? COLORS.glassBroken : COLORS.glass);
+        } else {
+          setPixel(px, py, COLORS.concrete);
+        }
+      } else if (style === 'broken') {
+        // Jagged top
+        const topJag = Math.floor(Math.random() * 4);
+        if (dy > bh - topJag - 1 && Math.random() < 0.5) continue;
+        if (dx === 0 || dx === bw - 1) {
+          setPixel(px, py, COLORS.concreteShadow);
+        } else if (Math.random() < 0.05) {
+          setPixel(px, py, COLORS.rebar);
+        } else {
+          setPixel(px, py, Math.random() < 0.3 ? COLORS.concreteDark : COLORS.concrete);
+        }
+      } else if (style === 'fallen') {
+        // Tilted/collapsed — draw horizontally
+        const fx = bx + dy;
+        const fy = by - Math.floor(dx * 0.3);
+        if (fx >= W || fx < 0 || fy < 0 || fy >= H) continue;
+        if (dx === 0 || dx === bw - 1) {
+          setPixel(fx, fy, COLORS.concreteShadow);
+        } else {
+          setPixel(fx, fy, Math.random() < 0.1 ? COLORS.rebar : COLORS.concreteDark);
+        }
+        continue;
+      }
+    }
+  }
+
+  // Rubble at base
+  if (style !== 'fallen') {
+    const rubbleW = bw + Math.floor(Math.random() * 4);
+    for (let dx = -2; dx < rubbleW; dx++) {
+      if (Math.random() < 0.6) {
+        const ry = by + Math.floor(Math.random() * 2);
+        const rx = bx + dx;
+        if (rx >= 0 && rx < W && ry < H) {
+          setPixel(rx, ry, Math.random() < 0.5 ? COLORS.concreteDark : COLORS.concreteShadow);
+        }
+      }
+    }
+  }
+
+  ruins.push(ruin);
+}
+
+// Place 5-9 ruined buildings spread across the canvas
+const numBuildings = 5 + Math.floor(Math.random() * 5);
+const buildingSpacing = Math.floor(W / (numBuildings + 1));
+for (let i = 0; i < numBuildings; i++) {
+  const bx = buildingSpacing * (i + 1) - Math.floor(buildingSpacing / 2) + Math.floor(Math.random() * 20) - 10;
+  const styles = ['skyscraper', 'broken', 'broken', 'fallen'];
+  const style = styles[Math.floor(Math.random() * styles.length)];
+  let bw, bh;
+  if (style === 'skyscraper') {
+    bw = 6 + Math.floor(Math.random() * 6);
+    bh = 40 + Math.floor(Math.random() * 60);
+  } else if (style === 'fallen') {
+    bw = 4 + Math.floor(Math.random() * 4);
+    bh = 20 + Math.floor(Math.random() * 30);
+  } else {
+    bw = 5 + Math.floor(Math.random() * 8);
+    bh = 20 + Math.floor(Math.random() * 50);
+  }
+  // Jagged broken top for non-fallen
+  if (style === 'skyscraper' || style === 'broken') {
+    bh = Math.min(bh, terrain[Math.max(0, Math.min(bx, W-1))] - 5);
+  }
+  if (bh > 10 && bx > 2 && bx + bw < W - 2) {
+    drawBuilding(Math.max(0, Math.min(bx, W - bw - 1)), bw, bh, style);
+  }
+}
+
+// Small concrete structures (sheds, walls, pillars)
+const numSmall = 8 + Math.floor(Math.random() * 8);
+for (let i = 0; i < numSmall; i++) {
+  const sx = 5 + Math.floor(Math.random() * (W - 10));
+  const sw = 3 + Math.floor(Math.random() * 5);
+  const sh = 4 + Math.floor(Math.random() * 8);
+  const sy = terrain[Math.max(0, Math.min(sx, W - 1))] - sh;
+  const ruin = { x: sx, y: sy, w: sw, h: sh, mossCoverage: 0, maxMoss: sw * sh };
+  for (let dx = 0; dx < sw; dx++) {
+    for (let dy = 0; dy < sh; dy++) {
+      const px = sx + dx, py = sy + dy;
+      if (px < 0 || px >= W || py < 0 || py >= H) continue;
+      // Some have missing chunks
+      if (dy < 2 && Math.random() < 0.3) continue;
+      const edge = dx === 0 || dx === sw - 1;
+      const col = edge ? COLORS.concreteShadow : (Math.random() < 0.2 ? COLORS.concreteDark : COLORS.concrete);
+      setPixel(px, py, col);
+    }
+  }
+  ruins.push(ruin);
+}
+
+// Generate fallen power masts (diagonal, foreground)
+const masts = [];
+
+// Road signs (thin pole + sign panel, some tilted)
+const numSigns = 4 + Math.floor(Math.random() * 5);
+for (let i = 0; i < numSigns; i++) {
+  const sx = 10 + Math.floor(Math.random() * (W - 20));
+  const poleH = 8 + Math.floor(Math.random() * 10);
+  const baseY = terrain[Math.max(0, Math.min(sx, W - 1))] - 1;
+  const tilt = Math.random() < 0.4 ? (Math.random() < 0.5 ? -1 : 1) : 0;
+  const signPixels = [];
+  // Pole
+  for (let dy = 0; dy < poleH; dy++) {
+    const px = sx + Math.round(tilt * dy * 0.1);
+    const py = baseY - dy;
+    if (px >= 0 && px < W && py >= 0 && py < H) {
+      setPixel(px, py, Math.random() < 0.3 ? COLORS.rust : COLORS.metalDark);
+      signPixels.push({ x: px, y: py });
+    }
+  }
+  // Sign panel at top
+  const signW = 3 + Math.floor(Math.random() * 3);
+  const signH = 2 + Math.floor(Math.random() * 2);
+  const topX = sx + Math.round(tilt * poleH * 0.1) - Math.floor(signW / 2);
+  const topY = baseY - poleH - signH;
+  for (let dx = 0; dx < signW; dx++) {
+    for (let dy = 0; dy < signH; dy++) {
+      const px = topX + dx, py = topY + dy;
+      if (px >= 0 && px < W && py >= 0 && py < H) {
+        const r = Math.random();
+        let col;
+        if (r < 0.4) col = COLORS.rust;
+        else if (r < 0.7) col = COLORS.metal;
+        else col = [180, 180, 160]; // faded sign paint
+        setPixel(px, py, col);
+        signPixels.push({ x: px, y: py });
+      }
+    }
+  }
+  masts.push({ pixels: signPixels, mossCoverage: 0, maxMoss: signPixels.length });
+}
+
+function drawPowerMast(mx, angle, height) {
+  const baseY = terrain[Math.max(0, Math.min(mx, W - 1))] - 1;
+  const mast = { pixels: [], mossCoverage: 0, maxMoss: 0 };
+  const radAngle = angle * Math.PI / 180;
+  const cosA = Math.cos(radAngle);
+  const sinA = Math.sin(radAngle);
+
+  // Draw main pole (diagonal)
+  for (let i = 0; i < height; i++) {
+    const px = Math.round(mx + sinA * i);
+    const py = Math.round(baseY - cosA * i);
+    if (px < 0 || px >= W || py < 0 || py >= H) continue;
+    const col = Math.random() < 0.15 ? COLORS.rust : (Math.random() < 0.5 ? COLORS.metal : COLORS.metalDark);
+    setPixel(px, py, col);
+    mast.pixels.push({ x: px, y: py });
+    mast.maxMoss++;
+
+    // Cross arms at intervals
+    if (i > height * 0.4 && i % Math.floor(height * 0.2) < 2) {
+      const armLen = 6 + Math.floor(Math.random() * 4);
+      for (let a = -armLen; a <= armLen; a++) {
+        const ax = Math.round(px + cosA * a);
+        const ay = Math.round(py + sinA * a);
+        if (ax < 0 || ax >= W || ay < 0 || ay >= H) continue;
+        const armCol = Math.random() < 0.2 ? COLORS.rust : COLORS.metalLight;
+        setPixel(ax, ay, armCol);
+        mast.pixels.push({ x: ax, y: ay });
+        mast.maxMoss++;
+      }
+      // Hanging wires drooping down from arm ends
+      for (const dir of [-1, 1]) {
+        const wireStartX = Math.round(px + cosA * armLen * dir);
+        const wireStartY = Math.round(py + sinA * armLen * dir);
+        const wireLen = 4 + Math.floor(Math.random() * 6);
+        for (let w = 1; w <= wireLen; w++) {
+          const wx = wireStartX + dir * Math.floor(w * 0.3);
+          const wy = wireStartY + w;
+          if (wx < 0 || wx >= W || wy < 0 || wy >= H) continue;
+          setPixel(wx, wy, COLORS.metalDark);
+          mast.pixels.push({ x: wx, y: wy });
+          mast.maxMoss++;
+        }
+      }
+    }
+  }
+
+  // Lattice details on the pole
+  for (let i = 2; i < height - 2; i += 3) {
+    const px = Math.round(mx + sinA * i);
+    const py = Math.round(baseY - cosA * i);
+    for (const off of [-1, 1]) {
+      const lx = px + (Math.abs(cosA) > 0.5 ? off : 0);
+      const ly = py + (Math.abs(sinA) > 0.5 ? off : 0);
+      if (lx >= 0 && lx < W && ly >= 0 && ly < H) {
+        setPixel(lx, ly, COLORS.metalLight);
+        mast.pixels.push({ x: lx, y: ly });
+        mast.maxMoss++;
+      }
+    }
+  }
+
+  masts.push(mast);
+}
+
+// Place 2-4 fallen masts across the canvas
+const numMasts = 2 + Math.floor(Math.random() * 3);
+for (let i = 0; i < numMasts; i++) {
+  const mx = 20 + Math.floor(Math.random() * (W - 40));
+  const angle = 15 + Math.floor(Math.random() * 50) * (Math.random() < 0.5 ? 1 : -1);
+  const height = 30 + Math.floor(Math.random() * 40);
+  drawPowerMast(mx, angle, height);
+}
+
+// Save base layer (terrain + rocks + ruins + masts) for restoration
+baseLayer.set(pixels);
+
+const plants = [];
+
+function pickType() {
+  const r = Math.random();
+  if (r < 0.15) return 'flower';
+  if (r < 0.25) return 'bush';
+  if (r < 0.32) return 'mushroom';
+  if (r < 0.38) return 'cactus';
+  if (r < 0.44) return 'fern';
+  if (r < 0.50) return 'vine';
+  if (r < 0.57) return 'oak';
+  if (r < 0.63) return 'pine';
+  if (r < 0.69) return 'birch';
+  if (r < 0.74) return 'willow';
+  if (r < 0.79) return 'cherry';
+  if (r < 0.84) return 'maple';
+  if (r < 0.88) return 'cypress';
+  if (r < 0.92) return 'palm';
+  if (r < 0.96) return 'baobab';
+  return 'juniper';
+}
+
+function growNewPlant() {
+  const type = pickType();
+  const x = Math.floor(Math.random() * (W - 10)) + 5;
+  const id = nextPlantId++;
+  const base = { x, ground: terrain[x], height: 0, done: false, tick: 0, id };
+
+  switch (type) {
+    case 'flower':
+      plants.push({ ...base, type, maxHeight: 3 + Math.floor(Math.random() * 4), color: COLORS.flower[Math.floor(Math.random() * COLORS.flower.length)] });
+      break;
+    case 'bush':
+      plants.push({ ...base, type, maxHeight: 2 + Math.floor(Math.random() * 2), radius: 1 + Math.floor(Math.random() * 2) });
+      break;
+    case 'mushroom':
+      plants.push({ ...base, type, maxHeight: 2 + Math.floor(Math.random() * 2) });
+      break;
+    case 'cactus':
+      plants.push({ ...base, type, maxHeight: 4 + Math.floor(Math.random() * 5), arms: [] });
+      break;
+    case 'fern':
+      plants.push({ ...base, type, maxHeight: 3 + Math.floor(Math.random() * 3) });
+      break;
+    case 'vine':
+      plants.push({ ...base, type, maxHeight: 5 + Math.floor(Math.random() * 6), swayDir: Math.random() < 0.5 ? -1 : 1 });
+      break;
+    case 'oak':
+      plants.push({ ...base, type: 'tree', treeType: 'oak', maxHeight: 55 + Math.floor(Math.random() * 80), canopySize: 8 + Math.floor(Math.random() * 10), canopyShape: ['wide','spreading','round','asymmetric'][Math.floor(Math.random()*4)], growRate: 0.07 });
+      break;
+    case 'pine':
+      plants.push({ ...base, type: 'tree', treeType: 'pine', maxHeight: 50 + Math.floor(Math.random() * 70), canopySize: 0, canopyShape: 'round', growRate: 0.08 });
+      break;
+    case 'birch':
+      plants.push({ ...base, type: 'tree', treeType: 'birch', maxHeight: 40 + Math.floor(Math.random() * 50), canopySize: 6 + Math.floor(Math.random() * 6), canopyShape: ['wide','round','asymmetric'][Math.floor(Math.random()*3)], growRate: 0.1 });
+      break;
+    case 'willow':
+      plants.push({ ...base, type: 'tree', treeType: 'willow', maxHeight: 45 + Math.floor(Math.random() * 60), canopySize: 8 + Math.floor(Math.random() * 6), canopyShape: 'spreading', growRate: 0.06 });
+      break;
+    case 'cherry':
+      plants.push({ ...base, type: 'tree', treeType: 'cherry', maxHeight: 30 + Math.floor(Math.random() * 40), canopySize: 6 + Math.floor(Math.random() * 6), canopyShape: ['wide','round','spreading'][Math.floor(Math.random()*3)], growRate: 0.09 });
+      break;
+    case 'maple':
+      plants.push({ ...base, type: 'tree', treeType: 'maple', maxHeight: 50 + Math.floor(Math.random() * 65), canopySize: 8 + Math.floor(Math.random() * 8), canopyShape: ['wide','spreading','round','asymmetric'][Math.floor(Math.random()*4)], growRate: 0.07 });
+      break;
+    case 'cypress':
+      plants.push({ ...base, type: 'tree', treeType: 'cypress', maxHeight: 60 + Math.floor(Math.random() * 80), canopySize: 3, canopyShape: 'round', growRate: 0.06 });
+      break;
+    case 'palm':
+      plants.push({ ...base, type: 'tree', treeType: 'palm', maxHeight: 40 + Math.floor(Math.random() * 45), canopySize: 6 + Math.floor(Math.random() * 4), canopyShape: 'spreading', growRate: 0.1 });
+      break;
+    case 'baobab':
+      plants.push({ ...base, type: 'tree', treeType: 'baobab', maxHeight: 30 + Math.floor(Math.random() * 30), canopySize: 10 + Math.floor(Math.random() * 8), canopyShape: 'spreading', growRate: 0.04 });
+      break;
+    case 'juniper':
+      plants.push({ ...base, type: 'tree', treeType: 'juniper', maxHeight: 25 + Math.floor(Math.random() * 30), canopySize: 5 + Math.floor(Math.random() * 5), canopyShape: ['round','wide'][Math.floor(Math.random()*2)], growRate: 0.11 });
+      break;
+  }
+}
+
+function growFlower(p) {
+  const g = p.ground, id = p.id;
+  if (p.height < p.maxHeight) {
+    const steps = Math.min(2, p.maxHeight - p.height);
+    for (let s = 0; s < steps; s++) { p.height++; setPixel(p.x, g - p.height, COLORS.stem, id); }
+  } else if (!p.done) {
+    p.done = true;
+    const top = g - p.height;
+    setPixel(p.x, top, p.color, id);
+    if (Math.random() < 0.5) setPixel(p.x - 1, top, p.color, id);
+    if (Math.random() < 0.5) setPixel(p.x + 1, top, p.color, id);
+  }
+}
+
+function growBush(p) {
+  const g = p.ground, id = p.id;
+  if (p.height < p.maxHeight) {
+    const steps = Math.min(2, p.maxHeight - p.height);
+    for (let s = 0; s < steps; s++) { p.height++; setPixel(p.x, g - p.height, COLORS.stem, id); }
+  } else if (!p.done) {
+    p.done = true;
+    const cy = g - p.height;
+    for (let dx = -p.radius; dx <= p.radius; dx++) {
+      for (let dy = -p.radius; dy <= 0; dy++) {
+        if (dx * dx + dy * dy <= p.radius * p.radius + 1) {
+          const c = Math.random() < 0.3 ? COLORS.darkLeaf : COLORS.bush;
+          setPixel(p.x + dx, cy + dy, c, id);
+        }
+      }
+    }
+  }
+}
+
+function growMushroom(p) {
+  const g = p.ground, id = p.id;
+  if (p.height < p.maxHeight) {
+    p.height++;
+    setPixel(p.x, g - p.height, COLORS.mushStem, id);
+  } else if (!p.done) {
+    p.done = true;
+    const top = g - p.height;
+    setPixel(p.x, top - 1, COLORS.mushCap, id);
+    setPixel(p.x - 1, top, COLORS.mushCap, id);
+    setPixel(p.x, top, COLORS.mushCap, id);
+    setPixel(p.x + 1, top, COLORS.mushCap, id);
+    if (Math.random() < 0.5) setPixel(p.x, top - 1, COLORS.mushSpot, id);
+    if (Math.random() < 0.5) setPixel(p.x + 1, top, COLORS.mushSpot, id);
+  }
+}
+
+function growCactus(p) {
+  const g = p.ground, id = p.id;
+  if (p.height < p.maxHeight) {
+    p.height++;
+    const y = g - p.height;
+    setPixel(p.x, y, COLORS.cactus, id);
+    if (p.height % 2 === 0) setPixel(p.x, y, COLORS.cactusLight, id);
+    if (p.height > 3 && Math.random() < 0.25) {
+      const side = Math.random() < 0.5 ? -1 : 1;
+      setPixel(p.x + side, y, COLORS.cactus, id);
+      setPixel(p.x + side, y - 1, COLORS.cactus, id);
+    }
+  } else { p.done = true; }
+}
+
+function growFern(p) {
+  const g = p.ground, id = p.id;
+  if (p.height < p.maxHeight) {
+    p.height++;
+    const y = g - p.height;
+    setPixel(p.x, y, COLORS.fern, id);
+    const spread = Math.min(p.height, 3);
+    for (let s = 1; s <= spread; s++) {
+      if (Math.random() < 0.6) {
+        setPixel(p.x - s, y + s - 1, COLORS.fernLight, id);
+        setPixel(p.x + s, y + s - 1, COLORS.fernLight, id);
+      }
+    }
+  } else { p.done = true; }
+}
+
+function growVine(p) {
+  const g = p.ground, id = p.id;
+  if (p.height < p.maxHeight) {
+    p.height++;
+    const y = g - p.height;
+    const sway = Math.floor(Math.sin(p.height * 0.8) * 2) * p.swayDir;
+    setPixel(p.x + sway, y, COLORS.vine, id);
+    if (Math.random() < 0.2) {
+      setPixel(p.x + sway + (Math.random() < 0.5 ? -1 : 1), y, COLORS.berry, id);
+    }
+    if (Math.random() < 0.3) {
+      setPixel(p.x + sway + 1, y, COLORS.leaf, id);
+    }
+  } else { p.done = true; }
+}
+
+function growTree(p) {
+  if (!p.phase) p.phase = 'trunk';
+  if (!p.treeType) p.treeType = 'oak';
+  if (!p.canopyRadius) p.canopyRadius = 0;
+  const g = p.ground, id = p.id;
+
+  const tt = p.treeType;
+  const trunkCol = tt === 'birch' ? COLORS.birchTrunk : tt === 'palm' ? COLORS.palmTrunk : tt === 'baobab' ? COLORS.baobab : COLORS.trunk;
+  const trunkDark = tt === 'birch' ? COLORS.birchDark : tt === 'baobab' ? COLORS.baobabDark : COLORS.darkTrunk;
+
+  if (p.phase === 'trunk') {
+    if (Math.random() < p.growRate) {
+      p.height++;
+      const y = g - p.height;
+
+      if (tt === 'pine') {
+        setPixel(p.x, y, COLORS.trunk, id);
+        if (p.height > 3 && p.height % 2 === 0) {
+          const layerW = Math.min(Math.floor((p.height - 2) / 2), 5);
+          for (let dx = -layerW; dx <= layerW; dx++) {
+            if (Math.random() < 0.8) {
+              setPixel(p.x + dx, y + 1, Math.abs(dx) > layerW - 1 ? COLORS.pineDark : COLORS.pineNeedle, id);
+            }
+          }
+        }
+        if (p.height >= p.maxHeight) {
+          setPixel(p.x, y - 1, COLORS.pineNeedle, id);
+          p.done = true;
+        }
+      } else {
+        let trunkW;
+        if (tt === 'baobab') {
+          trunkW = p.height < p.maxHeight * 0.3 ? 1 : p.height < p.maxHeight * 0.6 ? 2 : 3;
+        } else if (tt === 'palm') {
+          trunkW = 0;
+        } else if (tt === 'cypress') {
+          trunkW = 0;
+        } else {
+          trunkW = p.height < p.maxHeight * 0.6 ? 0 : p.height < p.maxHeight * 0.8 ? 1 : 2;
+        }
+        for (let dx = -trunkW; dx <= trunkW; dx++) {
+          const col = Math.abs(dx) === trunkW ? trunkDark : trunkCol;
+          setPixel(p.x + dx, y, col, id);
+        }
+        if (tt === 'birch' && Math.random() < 0.3) {
+          setPixel(p.x, y, COLORS.birchDark, id);
+        }
+        // Palm: slight curve via offset
+        if (tt === 'palm' && p.height > 3 && p.height % 3 === 0) {
+          setPixel(p.x, y, COLORS.palmTrunk, id);
+        }
+        if (trunkW > 0 && p.height % 4 === 0) {
+          for (let dy = 0; dy < p.height; dy++) {
+            const yw = g - 1 - dy;
+            const localW = Math.max(0, Math.floor(trunkW * (1 - dy / p.height)));
+            for (let dx = -localW; dx <= localW; dx++) {
+              setPixel(p.x + dx, yw, Math.abs(dx) === localW ? trunkDark : trunkCol, id);
+            }
+          }
+        }
+        if (p.height > 5 && Math.random() < 0.4) {
+          const side = Math.random() < 0.5 ? -1 : 1;
+          const branchLen = 4 + Math.floor(Math.random() * 6);
+          const droop = branchLen > 6 ? 1 : 0;
+          for (let b = 1; b <= branchLen; b++) {
+            const by = y + (b > branchLen * 0.6 ? droop : 0);
+            setPixel(p.x + side * (trunkW + b), by, trunkCol, id);
+            if (Math.random() < 0.5) {
+              setPixel(p.x + side * (trunkW + b), by - 1, tt === 'cherry' ? COLORS.cherry : COLORS.leaf, id);
+            }
+            if (Math.random() < 0.35) {
+              setPixel(p.x + side * (trunkW + b), by + 1, tt === 'birch' ? [80, 200, 80] : COLORS.darkLeaf, id);
+            }
+          }
+          const tipX = p.x + side * (trunkW + branchLen);
+          const tipY = y + droop;
+          const leafCol1 = tt === 'cherry' ? COLORS.cherry : tt === 'birch' ? [80, 200, 80] : COLORS.leaf;
+          const leafCol2 = tt === 'cherry' ? COLORS.cherryDark : COLORS.darkLeaf;
+          for (let lx = -1; lx <= 1; lx++) {
+            for (let ly = -1; ly <= 1; ly++) {
+              if (Math.random() < 0.6) setPixel(tipX + side + lx, tipY + ly, Math.random() < 0.4 ? leafCol2 : leafCol1, id);
+            }
+          }
+        }
+        if (p.height >= p.maxHeight) {
+          p.phase = 'canopy';
+          // Seed initial branches for fractal-growing trees
+          if (tt !== 'willow' && tt !== 'cypress' && tt !== 'palm' && tt !== 'baobab' && tt !== 'pine') {
+            p.branches = [];
+            const shape = p.canopyShape || 'round';
+            const numBranches = 3 + Math.floor(Math.random() * 3);
+            let angleMin, angleMax;
+            if (shape === 'spreading') { angleMin = -Math.PI * 0.88; angleMax = -Math.PI * 0.12; }
+            else if (shape === 'wide') { angleMin = -Math.PI * 0.82; angleMax = -Math.PI * 0.18; }
+            else if (shape === 'asymmetric') {
+              const shift = (Math.random() < 0.5 ? 1 : -1) * 0.2;
+              angleMin = -Math.PI * (0.72 + shift); angleMax = -Math.PI * (0.28 + shift);
+            } else { angleMin = -Math.PI * 0.75; angleMax = -Math.PI * 0.25; }
+            for (let b = 0; b < numBranches; b++) {
+              const angle = angleMin + (angleMax - angleMin) * (b / (numBranches - 1)) + (Math.random() - 0.5) * 0.3;
+              const maxLen = 8 + Math.floor(Math.random() * 10);
+              p.branches.push({ x: p.x, y: g - p.height, angle, len: 0, maxLen, depth: 0 });
+            }
+          }
+        }
+      }
+    }
+  } else if (p.phase === 'canopy') {
+    if (Math.random() < 0.4) {
+      p.canopyRadius += 0.5;
+      const top = g - p.height;
+      const r = Math.floor(p.canopyRadius);
+
+      if (p.branches && p.branches.length > 0) {
+        // Fractal branch growth
+        const leafCol1 = tt === 'cherry' ? COLORS.cherry : tt === 'maple' ? COLORS.maple : tt === 'birch' ? [80, 200, 80] : COLORS.leaf;
+        const leafCol2 = tt === 'cherry' ? COLORS.cherryDark : tt === 'maple' ? COLORS.mapleDark : tt === 'birch' ? [50, 150, 50] : COLORS.darkLeaf;
+        const leafCol3 = tt === 'maple' ? COLORS.mapleGreen : null;
+        const branchCol = tt === 'birch' ? COLORS.birchTrunk : COLORS.trunk;
+        const branchDark = tt === 'birch' ? COLORS.birchDark : COLORS.darkTrunk;
+
+        // Collect all branches (flatten tree)
+        const allBranches = [];
+        const collectBranches = (arr) => { for (const b of arr) { allBranches.push(b); if (b.children) collectBranches(b.children); } };
+        collectBranches(p.branches);
+
+        // Pick 2-3 random branches to grow this tick
+        const growCount = 2 + (Math.random() < 0.4 ? 1 : 0);
+        for (let gc = 0; gc < growCount; gc++) {
+          const b = allBranches[Math.floor(Math.random() * allBranches.length)];
+          if (b.len < b.maxLen) {
+            // Extend branch
+            b.len++;
+            const tipX = Math.round(b.x + Math.cos(b.angle) * b.len);
+            const tipY = Math.round(b.y + Math.sin(b.angle) * b.len);
+            if (tipX >= 0 && tipX < W && tipY >= 0 && tipY < H) {
+              setPixel(tipX, tipY, b.depth === 0 ? branchCol : branchDark, id);
+              // Thicker main branches
+              if (b.depth === 0 && b.len > 1) {
+                const perpX = Math.round(tipX + Math.cos(b.angle + Math.PI/2));
+                const perpY = Math.round(tipY + Math.sin(b.angle + Math.PI/2));
+                if (perpX >= 0 && perpX < W && perpY >= 0 && perpY < H) setPixel(perpX, perpY, branchDark, id);
+              }
+              // Leaves grow along branches too (not just tips)
+              if (b.depth >= 1 && Math.random() < 0.5) {
+                const lx = tipX + (Math.random() < 0.5 ? -1 : 1);
+                const ly = tipY + (Math.random() < 0.5 ? -1 : 1);
+                if (lx >= 0 && lx < W && ly >= 0 && ly < H) {
+                  setPixel(lx, ly, Math.random() < 0.4 ? leafCol2 : leafCol1, id);
+                }
+              }
+            }
+          } else if (b.depth < 2 && (!b.children || b.children.length < 4) && Math.random() < 0.45) {
+            // Fork a new sub-branch
+            if (!b.children) b.children = [];
+            const forkAngle = b.angle + (Math.random() - 0.5) * 1.4;
+            const tipX = Math.round(b.x + Math.cos(b.angle) * b.len);
+            const tipY = Math.round(b.y + Math.sin(b.angle) * b.len);
+            const childMaxLen = b.depth === 0 ? 4 + Math.floor(Math.random() * 5) : 2 + Math.floor(Math.random() * 4);
+            b.children.push({ x: tipX, y: tipY, angle: forkAngle, len: 0, maxLen: childMaxLen, depth: b.depth + 1, children: [] });
+          } else {
+            // Draw leaves around tip
+            const tipX = Math.round(b.x + Math.cos(b.angle) * b.len);
+            const tipY = Math.round(b.y + Math.sin(b.angle) * b.len);
+            const leafCount = 3 + Math.floor(Math.random() * 4);
+            for (let lf = 0; lf < leafCount; lf++) {
+              const lx = tipX + Math.floor(Math.random() * 5) - 2;
+              const ly = tipY + Math.floor(Math.random() * 5) - 2;
+              if (lx >= 0 && lx < W && ly >= 0 && ly < H) {
+                const col = leafCol3 && Math.random() < 0.3 ? leafCol3 : Math.random() < 0.4 ? leafCol2 : leafCol1;
+                setPixel(lx, ly, col, id);
+              }
+            }
+          }
+        }
+      } else if (tt === 'willow') {
+        const rw = Math.floor(r * 2.2);
+        for (let dx = -rw; dx <= rw; dx++) {
+          const edgeFade = 1 - Math.abs(dx) / rw;
+          if (Math.random() < 0.7 * edgeFade) setPixel(p.x + dx, top - 1, COLORS.willow, id);
+          if (Math.random() < 0.7 * edgeFade) setPixel(p.x + dx, top, COLORS.willowDark, id);
+          const dropLen = Math.floor(Math.random() * (r + 5) * edgeFade);
+          for (let dy = 1; dy <= dropLen; dy++) {
+            if (Math.random() < 0.55) setPixel(p.x + dx, top + dy, COLORS.willow, id);
+          }
+        }
+      } else if (tt === 'cypress') {
+        // Cypress: tall narrow columnar shape
+        const cw = Math.min(r, 2);
+        for (let dy = -r * 3; dy <= r; dy++) {
+          const rowW = Math.max(1, cw - Math.floor(Math.abs(dy) / (r + 1)));
+          for (let dx = -rowW; dx <= rowW; dx++) {
+            if (Math.random() < 0.8) {
+              setPixel(p.x + dx, top + dy, Math.random() < 0.4 ? COLORS.cypressDark : COLORS.cypress, id);
+            }
+          }
+        }
+      } else if (tt === 'palm') {
+        // Palm: fronds radiating outward and drooping
+        const fronds = 5 + Math.floor(Math.random() * 3);
+        for (let f = 0; f < fronds; f++) {
+          const angle = (f / fronds) * Math.PI * 2;
+          const len = r + 2;
+          for (let s = 0; s < len; s++) {
+            const fx = Math.round(p.x + Math.cos(angle) * s);
+            const fy = Math.round(top + Math.sin(angle) * s * 0.5 + s * 0.3);
+            setPixel(fx, fy, COLORS.palm, id);
+            if (s > 1 && Math.random() < 0.5) setPixel(fx, fy + 1, COLORS.darkLeaf, id);
+          }
+        }
+      } else if (tt === 'baobab') {
+        const rw = Math.floor(r * 2.2);
+        const rh = Math.floor(r * 0.4);
+        for (let dx = -rw; dx <= rw; dx++) {
+          for (let dy = -rh; dy <= rh; dy++) {
+            const dist = (dx * dx) / (rw * rw) + (dy * dy) / (rh * rh);
+            if (dist <= 1 && Math.random() < 0.6) {
+              const c = Math.random() < 0.4 ? COLORS.darkLeaf : COLORS.leaf;
+              setPixel(p.x + dx, top + dy, c, id);
+            }
+          }
+        }
+        for (let b = 0; b < 5; b++) {
+          const angle = (b / 5) * Math.PI - Math.PI / 2;
+          const bLen = Math.floor(r * 1.2);
+          for (let s = 0; s < bLen; s++) {
+            const bx = Math.round(p.x + Math.cos(angle) * s * 1.5);
+            const by = Math.round(top + Math.sin(angle) * s * 0.4 + s * 0.2);
+            setPixel(bx, by, COLORS.baobab, id);
+          }
+        }
+      } else if (tt === 'juniper') {
+        const shape = p.canopyShape || 'round';
+        const rw = shape === 'wide' ? Math.floor(r * 1.6) : r;
+        const rh = shape === 'wide' ? Math.floor(r * 0.7) : r;
+        for (let dx = -rw; dx <= rw; dx++) {
+          for (let dy = -rh; dy <= rh; dy++) {
+            const dist = (dx*dx)/(rw*rw) + (dy*dy)/(rh*rh);
+            if (dist <= 1 && Math.random() < 0.65) {
+              if (Math.random() < 0.1) {
+                setPixel(p.x + dx, top + dy, COLORS.juniperBerry, id);
+              } else {
+                setPixel(p.x + dx, top + dy, Math.random() < 0.4 ? COLORS.juniper : COLORS.darkLeaf, id);
+              }
+            }
+          }
+        }
+      } else {
+        const shape = p.canopyShape || 'round';
+        const rw = shape === 'wide' ? Math.floor(r * 1.8) : shape === 'spreading' ? Math.floor(r * 2.4) : shape === 'asymmetric' ? Math.floor(r * 1.6) : r;
+        const rh = shape === 'spreading' ? Math.floor(r * 0.45) : shape === 'wide' ? Math.floor(r * 0.65) : r;
+        const offX = shape === 'asymmetric' ? Math.floor(r * 0.5) * (Math.random() < 0.5 ? 1 : -1) : 0;
+        const leafCol = tt === 'birch' ? [80, 200, 80] : COLORS.leaf;
+        const leafDk = tt === 'birch' ? [50, 150, 50] : COLORS.darkLeaf;
+        for (let dx = -rw; dx <= rw; dx++) {
+          for (let dy = -rh; dy <= rh; dy++) {
+            const dist = ((dx-offX)*(dx-offX))/(rw*rw) + (dy*dy)/(rh*rh);
+            if (dist <= 1 && Math.random() < 0.7) {
+              setPixel(p.x + dx, top + dy, Math.random() < 0.4 ? leafDk : leafCol, id);
+            }
+          }
+        }
+      }
+      if (p.canopyRadius >= p.canopySize) p.done = true;
+    }
+  }
+}
+
+// Fallen logs that plants can grow on
+const logs = [];
+
+// Falling tree animations
+const fallingTrees = [];
+
+function killByLightning(p) {
+  const g = p.ground;
+  removePlantPixels(p.id);
+  const stumpH = Math.min(4, Math.floor(p.height * 0.3));
+  for (let dy = 0; dy < stumpH; dy++) {
+    setPixel(p.x, g - 1 - dy, [30, 25, 20]);
+    if (dy < 2) {
+      setPixel(p.x - 1, g - 1 - dy, [25, 20, 15]);
+      setPixel(p.x + 1, g - 1 - dy, [25, 20, 15]);
+    }
+  }
+}
+
+function playTreeFallSound(height) {
+  if (!musicPlaying || !audioCtx) return;
+  const ctx = audioCtx;
+  const now = ctx.currentTime;
+  const vol = Math.min(0.08, 0.03 + height * 0.0005);
+
+  // Deep groaning (low sawtooth, slow descent)
+  const groan = ctx.createOscillator();
+  const groanGain = ctx.createGain();
+  groan.type = 'sawtooth';
+  groan.frequency.setValueAtTime(80 + height * 0.3, now);
+  groan.frequency.linearRampToValueAtTime(35, now + 1.2);
+  groanGain.gain.setValueAtTime(0, now);
+  groanGain.gain.linearRampToValueAtTime(vol * 0.6, now + 0.1);
+  groanGain.gain.setValueAtTime(vol * 0.6, now + 0.6);
+  groanGain.gain.linearRampToValueAtTime(vol * 0.3, now + 1.0);
+  groanGain.gain.linearRampToValueAtTime(0, now + 1.4);
+  groan.connect(groanGain);
+  groanGain.connect(ctx.destination);
+  groan.start(now);
+  groan.stop(now + 1.4);
+
+  // Sub-bass rumble layer under the groan
+  const rumble = ctx.createOscillator();
+  const rumbleGain = ctx.createGain();
+  rumble.type = 'sine';
+  rumble.frequency.setValueAtTime(40, now);
+  rumble.frequency.linearRampToValueAtTime(25, now + 1.2);
+  rumbleGain.gain.setValueAtTime(0, now);
+  rumbleGain.gain.linearRampToValueAtTime(vol * 0.4, now + 0.2);
+  rumbleGain.gain.linearRampToValueAtTime(vol * 0.2, now + 1.0);
+  rumbleGain.gain.linearRampToValueAtTime(0, now + 1.4);
+  rumble.connect(rumbleGain);
+  rumbleGain.connect(ctx.destination);
+  rumble.start(now);
+  rumble.stop(now + 1.4);
+
+  // Low crackle (subtle, low-pitched snaps)
+  for (let i = 0; i < 3; i++) {
+    const crack = ctx.createOscillator();
+    const crackGain = ctx.createGain();
+    crack.type = 'square';
+    crack.frequency.value = 120 + Math.random() * 80;
+    const t = now + 0.9 + i * 0.15;
+    crackGain.gain.setValueAtTime(0, t);
+    crackGain.gain.linearRampToValueAtTime(vol * 0.15, t + 0.01);
+    crackGain.gain.linearRampToValueAtTime(0, t + 0.05);
+    crack.connect(crackGain);
+    crackGain.connect(ctx.destination);
+    crack.start(t);
+    crack.stop(t + 0.05);
+  }
+}
+
+function playTreeImpactSound(height) {
+  if (!musicPlaying || !audioCtx) return;
+  const ctx = audioCtx;
+  const now = ctx.currentTime;
+  const vol = Math.min(0.08, 0.03 + height * 0.0005);
+
+  // Deep bass thud
+  const thud = ctx.createOscillator();
+  const thudGain = ctx.createGain();
+  thud.type = 'sine';
+  thud.frequency.setValueAtTime(50 + height * 0.2, now);
+  thud.frequency.linearRampToValueAtTime(18, now + 0.6);
+  thudGain.gain.setValueAtTime(0, now);
+  thudGain.gain.linearRampToValueAtTime(vol * 1.3, now + 0.02);
+  thudGain.gain.linearRampToValueAtTime(vol * 0.6, now + 0.2);
+  thudGain.gain.linearRampToValueAtTime(0, now + 0.8);
+  thud.connect(thudGain);
+  thudGain.connect(ctx.destination);
+  thud.start(now);
+  thud.stop(now + 0.8);
+
+  // Sub-bass boom resonance
+  const boom = ctx.createOscillator();
+  const boomGain = ctx.createGain();
+  boom.type = 'triangle';
+  boom.frequency.setValueAtTime(30, now);
+  boom.frequency.linearRampToValueAtTime(15, now + 1.0);
+  boomGain.gain.setValueAtTime(0, now);
+  boomGain.gain.linearRampToValueAtTime(vol * 0.8, now + 0.03);
+  boomGain.gain.linearRampToValueAtTime(vol * 0.3, now + 0.4);
+  boomGain.gain.linearRampToValueAtTime(0, now + 1.0);
+  boom.connect(boomGain);
+  boomGain.connect(ctx.destination);
+  boom.start(now);
+  boom.stop(now + 1.0);
+}
+
+function startFalling(p) {
+  const g = p.ground;
+  removePlantPixels(p.id);
+  playTreeFallSound(p.height);
+  // Store the tree's visual data for animation
+  const dir = Math.random() < 0.5 ? -1 : 1;
+  const trunkH = p.height;
+  const totalFrames = Math.min(12, Math.max(5, Math.floor(trunkH / 5)));
+  fallingTrees.push({
+    x: p.x, g, trunkH, dir, totalFrames,
+    frame: 0, angle: 0,
+    trunkCol: p.treeType === 'birch' ? COLORS.birchTrunk : p.treeType === 'baobab' ? COLORS.baobab : COLORS.trunk,
+    trunkDark: p.treeType === 'birch' ? COLORS.birchDark : p.treeType === 'baobab' ? COLORS.baobabDark : COLORS.darkTrunk,
+    canopySize: p.canopySize || 0,
+    treeType: p.treeType,
+  });
+}
+
+function drawFallingTree(ft) {
+  const progress = ft.frame / ft.totalFrames; // 0 to 1
+  const angle = progress * Math.PI * 0.5; // 0 to 90 degrees
+
+  // Draw trunk as a rotating line
+  for (let i = 0; i < ft.trunkH; i++) {
+    const px = ft.x + Math.round(Math.sin(angle) * i * ft.dir);
+    const py = ft.g - 1 - Math.round(Math.cos(angle) * i);
+    const col = i % 4 === 0 ? ft.trunkDark : ft.trunkCol;
+    setOverlay(px, py, col);
+    // Slight width for bigger trees
+    if (ft.trunkH > 20 && i < ft.trunkH * 0.5) {
+      setOverlay(px, py + 1, ft.trunkDark);
+    }
+  }
+
+  // Draw a canopy blob at the tip
+  if (ft.canopySize > 0) {
+    const tipX = ft.x + Math.round(Math.sin(angle) * ft.trunkH * ft.dir);
+    const tipY = ft.g - 1 - Math.round(Math.cos(angle) * ft.trunkH);
+    const cr = Math.min(ft.canopySize, 4);
+    for (let dx = -cr; dx <= cr; dx++) {
+      for (let dy = -cr; dy <= cr; dy++) {
+        if (dx * dx + dy * dy <= cr * cr && Math.random() < 0.8) {
+          setOverlay(tipX + dx, tipY + dy, Math.random() < 0.4 ? COLORS.darkLeaf : COLORS.leaf);
+        }
+      }
+    }
+  }
+}
+
+function updateFallingTrees() {
+  for (let i = fallingTrees.length - 1; i >= 0; i--) {
+    const ft = fallingTrees[i];
+    ft.frame++;
+    if (ft.frame >= ft.totalFrames) {
+      playTreeImpactSound(ft.trunkH);
+      // Landing: create log
+      const logLen = Math.min(Math.floor(ft.trunkH * 0.4), 12);
+      const log = { x: ft.x, y: ft.g - 1, len: logLen, dir: ft.dir, mossCoverage: 0 };
+      for (let s = 0; s < logLen; s++) {
+        setPixel(ft.x + ft.dir * s, ft.g - 1, COLORS.darkTrunk);
+        setPixel(ft.x + ft.dir * s, ft.g - 2, ft.trunkCol);
+      }
+      logs.push(log);
+      fallingTrees.splice(i, 1);
+    } else {
+      drawFallingTree(ft);
+    }
+  }
+}
+
+function tryKillPlant(idx) {
+  const p = plants[idx];
+  if (!p.done && p.type !== 'tree') return false;
+  if (p.type === 'tree' && !p.done && p.height < 5) return false;
+
+  if (p.type === 'tree') {
+    if (Math.random() < 0.5) {
+      startFalling(p);
+    } else {
+      removePlantPixels(p.id);
+    }
+  } else {
+    removePlantPixels(p.id);
+  }
+  plants.splice(idx, 1);
+  return true;
+}
+
+function grow() {
+  // Keep spawning — no hard cap, ecosystem self-regulates via death
+  const livingCount = plants.length;
+  const spawnChance = livingCount < 80 ? 0.6 : livingCount < 150 ? 0.3 : 0.1;
+  if (Math.random() < spawnChance) growNewPlant();
+  if (livingCount < 100 && Math.random() < 0.3) growNewPlant();
+
+  for (const p of plants) {
+    if (p.done) {
+      // Age the plant
+      if (!p.age) p.age = 0;
+      p.age++;
+      continue;
+    }
+    p.tick++;
+    switch (p.type) {
+      case 'flower': growFlower(p); break;
+      case 'bush': growBush(p); break;
+      case 'mushroom': growMushroom(p); break;
+      case 'cactus': growCactus(p); break;
+      case 'fern': growFern(p); break;
+      case 'vine': growVine(p); break;
+      case 'tree': growTree(p); break;
+    }
+  }
+
+  // Natural death — older plants die more often, but rarely
+  for (let i = plants.length - 1; i >= 0; i--) {
+    const p = plants[i];
+    if (!p.done || !p.age) continue;
+    // Small plants die sooner, trees live much longer
+    let lifespan = 300;
+    if (p.type === 'tree') {
+      lifespan = 2000 + p.maxHeight * 40;
+    }
+    const deathChance = Math.min(p.type === 'tree' ? 0.002 : 0.006, (p.age / lifespan) * 0.001);
+    if (Math.random() < deathChance) {
+      tryKillPlant(i);
+    }
+  }
+
+  // Lightning strike — kill a random tree during storms
+  if (weather.lightning === 3) {
+    const trees = [];
+    for (let i = 0; i < plants.length; i++) {
+      if (plants[i].type === 'tree' && plants[i].height > 8) trees.push(i);
+    }
+    if (trees.length > 0 && Math.random() < 0.4) {
+      const idx = trees[Math.floor(Math.random() * trees.length)];
+      killByLightning(plants[idx]);
+      plants.splice(idx, 1);
+    }
+  }
+
+  // Grow moss and lichen on rocks
+  for (const rock of rocks) {
+    if (Math.random() < 0.05 && rock.mossCoverage < rock.w * (rock.h + 1)) {
+      rock.mossCoverage++;
+      const dx = Math.floor(Math.random() * rock.w);
+      const dy = Math.floor(Math.random() * (rock.h + 1)) - 1;
+      const col = Math.random() < 0.6 ? COLORS.moss : COLORS.lichen;
+      setPixel(rock.x + dx, rock.y + dy, col);
+    }
+  }
+
+  // Grow moss and vines on car wrecks
+  for (const car of cars) {
+    if (Math.random() < 0.03 && car.mossCoverage < car.maxMoss * 0.7) {
+      car.mossCoverage++;
+      const p = car.pixels[Math.floor(Math.random() * car.pixels.length)];
+      const r = Math.random();
+      if (r < 0.4) setPixel(p.x, p.y, COLORS.moss);
+      else if (r < 0.6) setPixel(p.x, p.y, COLORS.vine);
+      else if (r < 0.8) setPixel(p.x, p.y, COLORS.lichen);
+      else {
+        setPixel(p.x, p.y, COLORS.leaf);
+        if (p.y - 1 >= 0) setPixel(p.x, p.y - 1, COLORS.darkLeaf);
+      }
+    }
+  }
+
+  // Grow moss and vines on ruins
+  for (const ruin of ruins) {
+    if (Math.random() < 0.03 && ruin.mossCoverage < ruin.maxMoss * 0.6) {
+      ruin.mossCoverage++;
+      const dx = Math.floor(Math.random() * ruin.w);
+      const dy = Math.floor(Math.random() * ruin.h);
+      const px = ruin.x + dx, py = ruin.y + dy;
+      if (px >= 0 && px < W && py >= 0 && py < H) {
+        if (Math.random() < 0.5) {
+          setPixel(px, py, COLORS.moss);
+        } else if (Math.random() < 0.5) {
+          setPixel(px, py, COLORS.lichen);
+        } else {
+          setPixel(px, py, COLORS.vine);
+        }
+      }
+    }
+  }
+
+  // Grow moss, vines and foliage on power masts
+  for (const mast of masts) {
+    if (Math.random() < 0.04 && mast.mossCoverage < mast.maxMoss * 0.7) {
+      mast.mossCoverage++;
+      const p = mast.pixels[Math.floor(Math.random() * mast.pixels.length)];
+      const r = Math.random();
+      if (r < 0.3) {
+        setPixel(p.x, p.y, COLORS.moss);
+      } else if (r < 0.5) {
+        setPixel(p.x, p.y, COLORS.vine);
+      } else if (r < 0.7) {
+        setPixel(p.x, p.y, COLORS.lichen);
+      } else {
+        // Small leaf clusters near the mast
+        setPixel(p.x, p.y, COLORS.leaf);
+        if (p.x + 1 < W) setPixel(p.x + 1, p.y, COLORS.darkLeaf);
+        if (p.y - 1 >= 0) setPixel(p.x, p.y - 1, COLORS.leaf);
+      }
+    }
+  }
+
+  // Grow moss and mushrooms on fallen logs
+  for (const log of logs) {
+    if (Math.random() < 0.04) {
+      log.mossCoverage++;
+      const i = Math.floor(Math.random() * log.len);
+      const lx = log.x + log.dir * i;
+      if (Math.random() < 0.5) {
+        setPixel(lx, log.y - 1, COLORS.moss);
+      } else if (Math.random() < 0.3) {
+        setPixel(lx, log.y - 1, COLORS.mushCap);
+        setPixel(lx, log.y, COLORS.lichen);
+      } else {
+        setPixel(lx, log.y, COLORS.moss);
+      }
+    }
+  }
+
+  // Hanging vines between nearby mature trees
+  if (Math.random() < 0.015) {
+    const matureTrees = plants.filter(p => p.type === 'tree' && p.done && p.height > 15);
+    if (matureTrees.length >= 2) {
+      const t1 = matureTrees[Math.floor(Math.random() * matureTrees.length)];
+      let closest = null, closestDist = Infinity;
+      for (const t2 of matureTrees) {
+        if (t2 === t1) continue;
+        const dist = Math.abs(t2.x - t1.x);
+        if (dist > 5 && dist < 50 && dist < closestDist) {
+          closest = t2;
+          closestDist = dist;
+        }
+      }
+      if (closest) {
+        const x1 = t1.x, x2 = closest.x;
+        const top1 = t1.ground - t1.height;
+        const top2 = closest.ground - closest.height;
+        const attachY1 = top1 + Math.floor(Math.random() * Math.min(8, t1.height * 0.3));
+        const attachY2 = top2 + Math.floor(Math.random() * Math.min(8, closest.height * 0.3));
+        const midX = (x1 + x2) / 2;
+        const sag = 3 + Math.floor(Math.random() * (closestDist * 0.3));
+        const steps = Math.abs(x2 - x1);
+        for (let s = 0; s <= steps; s++) {
+          const t = s / steps;
+          const vx = Math.round(x1 + (x2 - x1) * t);
+          const baseY = attachY1 + (attachY2 - attachY1) * t;
+          const catenary = sag * 4 * t * (1 - t);
+          const vy = Math.round(baseY + catenary);
+          if (vx >= 0 && vx < W && vy >= 0 && vy < H) {
+            const vineCol = Math.random() < 0.6 ? COLORS.vine || [50, 140, 50] : COLORS.darkLeaf;
+            setPixel(vx, vy, vineCol);
+            if (Math.random() < 0.2 && vy + 1 < H) {
+              setPixel(vx, vy + 1, COLORS.darkLeaf);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Animals - drawn on a separate overlay so they never erase plants
+const animals = [];
+const overlay = new Int16Array(W * H * 3).fill(-1); // -1 = transparent
+
+function setOverlay(x, y, color) {
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  const i = (y * W + x) * 3;
+  overlay[i] = color[0]; overlay[i+1] = color[1]; overlay[i+2] = color[2];
+}
+
+function clearOverlay() {
+  overlay.fill(-1);
+}
+
+function spawnMouse() {
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const x = dir === 1 ? 0 : W - 1;
+  animals.push({ type: 'mouse', x, y: terrain[x] - 1, dir, life: 40 + Math.floor(Math.random() * 60) });
+}
+
+function spawnBird() {
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const x = dir === 1 ? 0 : W - 1;
+  const y = 10 + Math.floor(Math.random() * 40);
+  animals.push({ type: 'bird', x, y, dir, life: 60 + Math.floor(Math.random() * 80), nesting: false, nestTimer: 0 });
+}
+
+function drawMouse(m) {
+  setOverlay(m.x, m.y, [160, 120, 80]);
+  setOverlay(m.x - m.dir, m.y, [160, 120, 80]);
+  setOverlay(m.x - m.dir * 2, m.y, [130, 100, 70]);
+}
+
+function drawBird(b) {
+  setOverlay(b.x, b.y, [60, 60, 180]);
+  setOverlay(b.x - 1, b.y - 1, [60, 60, 180]);
+  setOverlay(b.x + 1, b.y - 1, [60, 60, 180]);
+}
+
+function findTreeWithCanopy() {
+  const trees = plants.filter(p => p.type === 'tree' && p.done && !p.hasNest);
+  return trees.length > 0 ? trees[Math.floor(Math.random() * trees.length)] : null;
+}
+
+function buildNest(tree) {
+  tree.hasNest = true;
+  const ny = tree.ground - tree.height - 1;
+  const nx = tree.x;
+  setPixel(nx - 1, ny, COLORS.darkTrunk);
+  setPixel(nx, ny, COLORS.darkTrunk);
+  setPixel(nx + 1, ny, COLORS.darkTrunk);
+  setPixel(nx - 1, ny - 1, COLORS.trunk);
+  setPixel(nx + 1, ny - 1, COLORS.trunk);
+}
+
+function updateAnimals() {
+  if (Math.random() < 0.04 && animals.filter(a => a.type === 'mouse').length < 3) spawnMouse();
+  if (Math.random() < 0.03 && animals.filter(a => a.type === 'bird').length < 4) spawnBird();
+
+  clearOverlay();
+  updateWeather();
+  drawWeatherOverlay();
+  updateFallingTrees();
+  updateFlocks();
+
+  for (let i = animals.length - 1; i >= 0; i--) {
+    const a = animals[i];
+    a.life--;
+
+    if (a.life <= 0 || a.x < 0 || a.x >= W) {
+      animals.splice(i, 1);
+      continue;
+    }
+
+    if (a.type === 'mouse') {
+      if (Math.random() < 0.7) a.x += a.dir;
+      if (Math.random() < 0.05) a.dir *= -1;
+      if (a.x >= 0 && a.x < W) a.y = terrain[a.x] - 1;
+      drawMouse(a);
+
+    } else if (a.type === 'bird') {
+      if (a.nesting) {
+        a.nestTimer--;
+        if (a.nestTimer <= 0) {
+          a.nesting = false;
+          a.dir = Math.random() < 0.5 ? 1 : -1;
+        }
+        drawBird(a);
+      } else {
+        a.x += a.dir;
+        if (Math.random() < 0.3) a.y += Math.random() < 0.5 ? -1 : 1;
+        a.y = Math.max(1, Math.min(a.y, ground - 5));
+
+        if (Math.random() < 0.02) {
+          const tree = findTreeWithCanopy();
+          if (tree) {
+            a.nesting = true;
+            a.nestTimer = 10 + Math.floor(Math.random() * 15);
+            a.x = tree.x;
+            a.y = tree.ground - tree.height - 2;
+            buildNest(tree);
+          }
+        }
+        drawBird(a);
+      }
+    }
+  }
+}
+
+// Migrating bird flocks (V-pattern)
+const flocks = [];
+
+function spawnFlock() {
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const size = 5 + Math.floor(Math.random() * 8);
+  const y = 15 + Math.floor(Math.random() * 50);
+  flocks.push({
+    x: dir === 1 ? -size * 3 : W + size * 3,
+    y,
+    dir,
+    size,
+    speed: 1.5 + Math.random() * 0.8,
+    wingPhase: 0,
+  });
+}
+
+function updateFlocks() {
+  // Occasionally spawn a flock
+  if (Math.random() < 0.003 && flocks.length < 2) spawnFlock();
+
+  for (let i = flocks.length - 1; i >= 0; i--) {
+    const f = flocks[i];
+    f.x += f.dir * f.speed;
+    f.wingPhase += 0.15;
+
+    // Remove if off-screen
+    if ((f.dir === 1 && f.x > W + 20) || (f.dir === -1 && f.x < -20)) {
+      flocks.splice(i, 1);
+      continue;
+    }
+
+    // Draw V-pattern
+    const birdCol = [40, 40, 50];
+    for (let b = 0; b < f.size; b++) {
+      const side = b % 2 === 0 ? 1 : -1;
+      const rank = Math.ceil(b / 2);
+      const bx = Math.round(f.x - f.dir * rank * 2.5);
+      const by = Math.round(f.y + side * rank * 1.5 + Math.sin(f.wingPhase + rank * 0.3) * 0.8);
+      if (bx >= 0 && bx < W && by >= 0 && by < H) {
+        setOverlay(bx, by, birdCol);
+        // Wing pixels
+        const wingUp = Math.sin(f.wingPhase + rank * 0.5) > 0;
+        const wy = wingUp ? by - 1 : by + 1;
+        if (wy >= 0 && wy < H) {
+          setOverlay(bx - f.dir, wy, birdCol);
+        }
+      }
+    }
+  }
+}
+
+// Weather system with gradual transitions
+const WEATHER_LEVELS = { clear: 0, cloudy: 0.33, rain: 0.66, storm: 1.0 };
+const weather = {
+  state: 'clear', timer: 50, clouds: [], raindrops: [], lightning: 0,
+  intensity: 0, targetIntensity: 0, // 0=clear, 1=storm — lerps gradually
+};
+
+function spawnCloud(large) {
+  // Generate cloud as a collection of overlapping puffs
+  const baseW = large ? (45 + Math.floor(Math.random() * 40)) : (20 + Math.floor(Math.random() * 25));
+  const baseH = large ? (10 + Math.floor(Math.random() * 8)) : (5 + Math.floor(Math.random() * 5));
+  const numPuffs = large ? (4 + Math.floor(Math.random() * 5)) : (2 + Math.floor(Math.random() * 4));
+  const puffs = [];
+  for (let p = 0; p < numPuffs; p++) {
+    const pw = Math.floor(baseW * (0.35 + Math.random() * 0.55));
+    const ph = Math.floor(baseH * (0.5 + Math.random() * 0.7));
+    const px = Math.floor(Math.random() * (baseW - pw * 0.4));
+    const py = Math.floor(Math.random() * Math.max(1, baseH - ph));
+    puffs.push({ px, py, pw, ph });
+  }
+  const type = large ? (Math.random() < 0.6 ? 'cumulus' : 'stratus') : (Math.random() < 0.3 ? 'wispy' : 'cumulus');
+  weather.clouds.push({
+    x: -baseW - Math.random() * 20,
+    y: 8 + Math.floor(Math.random() * 45),
+    w: baseW, h: baseH,
+    puffs,
+    type,
+    speed: 0.1 + Math.random() * 0.15,
+    density: 0.65 + Math.random() * 0.35,
+  });
+}
+
+function updateWeather() {
+  weather.timer--;
+  if (weather.timer <= 0) {
+    const r = Math.random();
+    if (weather.state === 'clear') {
+      if (r < 0.4) { weather.state = 'cloudy'; weather.timer = 60 + Math.floor(Math.random() * 80); }
+      else { weather.timer = 40 + Math.floor(Math.random() * 60); }
+    } else if (weather.state === 'cloudy') {
+      if (r < 0.3) { weather.state = 'rain'; weather.timer = 40 + Math.floor(Math.random() * 60); }
+      else if (r < 0.45) { weather.state = 'storm'; weather.timer = 20 + Math.floor(Math.random() * 30); }
+      else { weather.state = 'clear'; weather.timer = 50 + Math.floor(Math.random() * 80); }
+    } else if (weather.state === 'rain') {
+      if (r < 0.3) { weather.state = 'storm'; weather.timer = 15 + Math.floor(Math.random() * 25); }
+      else { weather.state = 'cloudy'; weather.timer = 40 + Math.floor(Math.random() * 50); }
+    } else if (weather.state === 'storm') {
+      if (r < 0.5) { weather.state = 'rain'; weather.timer = 30 + Math.floor(Math.random() * 40); }
+      else { weather.state = 'cloudy'; weather.timer = 30 + Math.floor(Math.random() * 40); }
+    }
+    weather.targetIntensity = WEATHER_LEVELS[weather.state];
+  }
+
+  // Gradually lerp intensity toward target
+  const lerpSpeed = 0.02;
+  if (weather.intensity < weather.targetIntensity) {
+    weather.intensity = Math.min(weather.targetIntensity, weather.intensity + lerpSpeed);
+  } else if (weather.intensity > weather.targetIntensity) {
+    weather.intensity = Math.max(weather.targetIntensity, weather.intensity - lerpSpeed);
+  }
+
+  const intensity = weather.intensity;
+
+  // Cloud count scales with intensity — denser during rain/storm
+  const cloudTarget = Math.floor(2 + intensity * 10);
+  const spawnRate = 0.05 + intensity * 0.1;
+  if (weather.clouds.length < cloudTarget && Math.random() < spawnRate) {
+    spawnCloud(intensity > 0.5);
+  }
+
+  // Move clouds — slower in clear, slightly faster in storms
+  for (let i = weather.clouds.length - 1; i >= 0; i--) {
+    weather.clouds[i].x += weather.clouds[i].speed * (1 + intensity * 0.5);
+    if (weather.clouds[i].x > W + 10) weather.clouds.splice(i, 1);
+  }
+
+  // Rain scales with intensity (starts around 0.5)
+  weather.raindrops = [];
+  if (intensity > 0.4) {
+    const rainAmount = Math.floor((intensity - 0.4) / 0.6 * 40);
+    for (let i = 0; i < rainAmount; i++) {
+      weather.raindrops.push({
+        x: Math.floor(Math.random() * W),
+        y: Math.floor(Math.random() * (ground + 3)),
+      });
+    }
+  }
+
+  // Lightning only at high intensity
+  if (intensity > 0.85 && Math.random() < 0.08) {
+    weather.lightning = 3;
+  }
+  if (weather.lightning > 0) weather.lightning--;
+}
+
+function drawWeatherOverlay() {
+  const intensity = weather.intensity;
+  const cloudBright = Math.floor(210 - intensity * 140);
+
+  for (const c of weather.clouds) {
+    const baseX = Math.floor(c.x);
+
+    if (c.type === 'wispy') {
+      // Thin, stretched horizontal streaks
+      const col = [cloudBright + 10, cloudBright + 10, cloudBright + 20];
+      const colFade = [cloudBright - 10, cloudBright - 10, cloudBright];
+      for (let dx = 0; dx < c.w; dx++) {
+        const cx = baseX + dx;
+        if (cx < 0 || cx >= W) continue;
+        // Main streak
+        if (Math.random() < c.density * 0.8) {
+          setOverlay(cx, c.y, col);
+        }
+        // Occasional thin second row
+        if (dx % 3 === 0 && Math.random() < 0.4) {
+          setOverlay(cx, c.y + 1, colFade);
+        }
+      }
+    } else {
+      // Cumulus and stratus — draw overlapping puffs
+      for (const puff of c.puffs) {
+        const midX = puff.pw / 2, midY = puff.ph / 2;
+        for (let dx = 0; dx < puff.pw; dx++) {
+          for (let dy = 0; dy < puff.ph; dy++) {
+            const cx = baseX + puff.px + dx;
+            const cy = c.y + puff.py + dy;
+            if (cx < 0 || cx >= W || cy < 0 || cy >= H) continue;
+
+            // Elliptical shape
+            const distX = (dx - midX) / midX;
+            const distY = (dy - midY) / midY;
+            const dist = distX * distX + distY * distY;
+            if (dist > 1.1) continue;
+
+            // Texture: lighter at top, darker at bottom with noise
+            const vertFade = dy / puff.ph;
+            const noise = Math.random() * 15 - 7;
+            const bright = cloudBright - vertFade * 40 + noise;
+            const edgeFade = dist > 0.7 ? (1 - (dist - 0.7) / 0.4) : 1;
+
+            if (Math.random() > edgeFade * c.density) continue;
+
+            let r = Math.floor(bright);
+            let g = Math.floor(bright);
+            let b = Math.floor(bright + 8);
+
+            // Storm clouds get purple/dark blue tint
+            if (intensity > 0.6) {
+              const stormTint = (intensity - 0.6) / 0.4;
+              r = Math.floor(r - stormTint * 30);
+              b = Math.floor(b + stormTint * 15);
+            }
+
+            r = Math.max(30, Math.min(255, r));
+            g = Math.max(30, Math.min(255, g));
+            b = Math.max(30, Math.min(255, b));
+            setOverlay(cx, cy, [r, g, b]);
+          }
+        }
+      }
+
+      // Stratus: add flat bottom layer
+      if (c.type === 'stratus' || intensity > 0.5) {
+        const botY = c.y + c.h;
+        const darkCol = [Math.max(30, cloudBright - 35), Math.max(30, cloudBright - 35), Math.max(30, cloudBright - 25)];
+        for (let dx = 2; dx < c.w - 2; dx++) {
+          const cx = baseX + dx;
+          if (cx >= 0 && cx < W && botY < H && Math.random() < c.density * 0.7) {
+            setOverlay(cx, botY, darkCol);
+          }
+        }
+      }
+
+      // Cumulus: bright highlight on top puff
+      if (c.type === 'cumulus' && intensity < 0.5) {
+        const highlightCol = [Math.min(255, cloudBright + 25), Math.min(255, cloudBright + 25), Math.min(255, cloudBright + 30)];
+        const topPuff = c.puffs[0];
+        const highlightY = c.y + topPuff.py - 1;
+        if (highlightY >= 0) {
+          for (let dx = Math.floor(topPuff.pw * 0.2); dx < Math.floor(topPuff.pw * 0.8); dx++) {
+            const cx = baseX + topPuff.px + dx;
+            if (cx >= 0 && cx < W && Math.random() < 0.7) {
+              setOverlay(cx, highlightY, highlightCol);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Draw rain
+  for (const drop of weather.raindrops) {
+    setOverlay(drop.x, drop.y, [100, 130, 200]);
+    setOverlay(drop.x, drop.y + 1, [80, 110, 180]);
+  }
+}
+
+// Day/night cycle
+let timeOfDay = 0; // 0 to 1 (0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset)
+const DAY_LENGTH = 300; // ticks for a full cycle
+
+function getDaylight() {
+  const t = timeOfDay;
+  let brightness, tintR, tintG, tintB;
+
+  if (t < 0.2) {
+    brightness = 0.25; tintR = 20; tintG = 20; tintB = 50;
+  } else if (t < 0.3) {
+    const f = (t - 0.2) / 0.1;
+    brightness = 0.25 + f * 0.75;
+    tintR = Math.floor(20 + f * 40); tintG = Math.floor(20 + f * 15); tintB = Math.floor(50 - f * 30);
+  } else if (t < 0.45) {
+    const f = (t - 0.3) / 0.15;
+    brightness = 1.0;
+    tintR = Math.floor(60 - f * 60); tintG = Math.floor(35 - f * 35); tintB = Math.floor(20 - f * 20);
+  } else if (t < 0.55) {
+    brightness = 1.0; tintR = 0; tintG = 0; tintB = 0;
+  } else if (t < 0.7) {
+    const f = (t - 0.55) / 0.15;
+    brightness = 1.0;
+    tintR = Math.floor(f * 50); tintG = Math.floor(f * 20); tintB = 0;
+  } else if (t < 0.8) {
+    const f = (t - 0.7) / 0.1;
+    brightness = 1.0 - f * 0.75;
+    tintR = Math.floor(50 + f * 10); tintG = Math.floor(20 - f * 10); tintB = Math.floor(f * 40);
+  } else {
+    brightness = 0.25; tintR = 20; tintG = 20; tintB = 50;
+  }
+  return { brightness, tintR, tintG, tintB };
+}
+
+function getSkyColor(y) {
+  const t = timeOfDay;
+  // Vertical gradient factor: 0 at top, 1 at horizon
+  const maxSkyY = Math.min(...terrain);
+  const vf = Math.min(1, y / maxSkyY);
+
+  let r, g, b;
+  if (t < 0.15) {
+    // Deep night
+    r = 8; g = 8; b = 25 + Math.floor(vf * 10);
+  } else if (t < 0.25) {
+    // Pre-dawn
+    const f = (t - 0.15) / 0.1;
+    r = Math.floor(8 + f * 60 * vf);
+    g = Math.floor(8 + f * 20 * vf);
+    b = Math.floor(25 + f * 20);
+  } else if (t < 0.35) {
+    // Sunrise
+    const f = (t - 0.25) / 0.1;
+    r = Math.floor(60 * vf + f * (180 * vf - 60 * vf));
+    g = Math.floor(20 * vf + f * (80 + 60 * vf));
+    b = Math.floor(45 + f * (140 - 45));
+  } else if (t < 0.45) {
+    // Morning to midday
+    const f = (t - 0.35) / 0.1;
+    r = Math.floor((180 * vf) * (1 - f) + 80 * (1 - vf) * f);
+    g = Math.floor((80 + 60 * vf) * (1 - f) + (150 + 50 * (1 - vf)) * f);
+    b = Math.floor(140 + f * (80 - 20 * vf));
+  } else if (t < 0.6) {
+    // Midday - blue sky with lighter horizon
+    r = Math.floor(80 * (1 - vf));
+    g = Math.floor(150 + 50 * (1 - vf));
+    b = Math.floor(200 + 30 * (1 - vf));
+  } else if (t < 0.7) {
+    // Afternoon
+    const f = (t - 0.6) / 0.1;
+    r = Math.floor(80 * (1 - vf) + f * 120 * vf);
+    g = Math.floor(150 + 50 * (1 - vf) - f * 60);
+    b = Math.floor(200 + 30 * (1 - vf) - f * 60);
+  } else if (t < 0.8) {
+    // Sunset
+    const f = (t - 0.7) / 0.1;
+    r = Math.floor(120 * vf + (1 - f) * 80 * (1 - vf) + f * 60 * vf);
+    g = Math.floor(90 + 50 * (1 - vf) - f * 70);
+    b = Math.floor(140 - f * 80 + 40 * (1 - vf));
+  } else if (t < 0.9) {
+    // Dusk
+    const f = (t - 0.8) / 0.1;
+    r = Math.floor((180 * vf) * (1 - f) + 20 * f);
+    g = Math.floor((20 + 50 * (1 - vf)) * (1 - f) + 10 * f);
+    b = Math.floor((60 + 40 * (1 - vf)) * (1 - f) + 35 * f);
+  } else {
+    // Night
+    r = 8; g = 8; b = 25 + Math.floor(vf * 10);
+  }
+  return [Math.max(0, Math.min(255, r)), Math.max(0, Math.min(255, g)), Math.max(0, Math.min(255, b))];
+}
+
+function isSkyPixel(i) {
+  const oi = i * 3;
+  return pixels[oi] === COLORS.sky[0] && pixels[oi + 1] === COLORS.sky[1] && pixels[oi + 2] === COLORS.sky[2];
+}
+
+function render() {
+  timeOfDay = (timeOfDay + 1 / DAY_LENGTH) % 1;
+  const { brightness, tintR, tintG, tintB } = getDaylight();
+
+  const imageData = ctx.createImageData(W, H);
+  for (let i = 0; i < W * H; i++) {
+    const oi = i * 3;
+    const y = Math.floor(i / W);
+    let r, g, b;
+
+    if (overlay[oi] >= 0) {
+      r = overlay[oi]; g = overlay[oi + 1]; b = overlay[oi + 2];
+      r = Math.min(255, Math.floor(r * brightness + tintR * (1 - brightness)));
+      g = Math.min(255, Math.floor(g * brightness + tintG * (1 - brightness)));
+      b = Math.min(255, Math.floor(b * brightness + tintB * (1 - brightness)));
+    } else if (isSkyPixel(i)) {
+      [r, g, b] = getSkyColor(y);
+    } else {
+      r = pixels[oi]; g = pixels[oi + 1]; b = pixels[oi + 2];
+      r = Math.min(255, Math.floor(r * brightness + tintR * (1 - brightness)));
+      g = Math.min(255, Math.floor(g * brightness + tintG * (1 - brightness)));
+      b = Math.min(255, Math.floor(b * brightness + tintB * (1 - brightness)));
+    }
+    // Lightning flash
+    if (weather.lightning > 0) {
+      const flash = weather.lightning * 40;
+      r = Math.min(255, r + flash);
+      g = Math.min(255, g + flash);
+      b = Math.min(255, b + flash);
+    }
+    imageData.data[i * 4] = r;
+    imageData.data[i * 4 + 1] = g;
+    imageData.data[i * 4 + 2] = b;
+    imageData.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+let speed = 1;
+let interval = setInterval(() => { grow(); updateAnimals(); render(); }, 800);
+
+document.querySelector('.speed').addEventListener('click', e => {
+  if (!e.target.dataset.speed) return;
+  speed = parseFloat(e.target.dataset.speed);
+  document.querySelectorAll('.speed button').forEach(b => b.classList.remove('active'));
+  e.target.classList.add('active');
+  clearInterval(interval);
+  interval = setInterval(() => {
+    for (let i = 0; i < speed; i++) { grow(); updateAnimals(); }
+    render();
+  }, 800 / speed);
+});
+
+document.querySelector('.weather-btns').addEventListener('click', e => {
+  if (!e.target.dataset.weather) return;
+  weather.state = e.target.dataset.weather;
+  weather.targetIntensity = WEATHER_LEVELS[weather.state];
+  weather.timer = 80 + Math.floor(Math.random() * 60);
+  document.querySelectorAll('.weather-btns button').forEach(b => b.classList.remove('active'));
+  e.target.classList.add('active');
+});
+
+document.getElementById('flockBtn').addEventListener('click', () => {
+  spawnFlock();
+});
+
+render();
+
+// Procedural 16-bit ambient music (loopable)
+let musicPlaying = false;
+let audioCtx = null;
+
+function startMusic() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const master = audioCtx.createGain();
+  master.gain.value = 0.3;
+  master.connect(audioCtx.destination);
+
+  // Pentatonic scale notes (peaceful, no dissonance)
+  const scale = [261.6, 293.7, 329.6, 392.0, 440.0, 523.3, 587.3, 659.3];
+  const bassNotes = [130.8, 146.8, 164.8, 196.0];
+  const loopLen = 128; // 128 beats per loop (~2.5 minutes)
+  const beatTime = 1.2; // seconds per beat (slow, ambient pace)
+  const loopDuration = loopLen * beatTime;
+
+  // Generate a sparse melody pattern (mostly rests, gentle notes)
+  const melodyPattern = [];
+  for (let i = 0; i < loopLen; i++) {
+    if (i % 8 === 0 || (i % 4 === 0 && Math.random() < 0.3) || Math.random() < 0.08) {
+      melodyPattern.push(scale[Math.floor(Math.random() * scale.length)]);
+    } else {
+      melodyPattern.push(0); // rest
+    }
+  }
+
+  // Arpeggio pattern (plays only in some sections)
+  const arpPattern = [];
+  for (let i = 0; i < loopLen * 2; i++) {
+    const section = Math.floor(i / 32);
+    if (section % 3 === 1) {
+      arpPattern.push(scale[i % scale.length]);
+    } else {
+      arpPattern.push(0);
+    }
+  }
+
+  // Bass pattern (slow whole notes across the loop)
+  const bassPattern = [];
+  for (let i = 0; i < 16; i++) {
+    bassPattern.push(bassNotes[Math.floor(Math.random() * bassNotes.length)]);
+  }
+
+  function scheduleLoop(startTime) {
+    // Pad (sustained triangle wave chord)
+    const padNotes = [scale[0], scale[2], scale[4]];
+    padNotes.forEach(freq => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = freq * 0.5;
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(0.06, startTime + 1);
+      gain.gain.setValueAtTime(0.06, startTime + loopDuration - 1);
+      gain.gain.linearRampToValueAtTime(0, startTime + loopDuration);
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(startTime);
+      osc.stop(startTime + loopDuration);
+    });
+
+    // Melody (square wave, very gentle, 8-bit feel)
+    melodyPattern.forEach((freq, i) => {
+      if (freq === 0) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = freq;
+      const t = startTime + i * beatTime;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.018, t + 0.08);
+      gain.gain.setValueAtTime(0.018, t + beatTime * 0.5);
+      gain.gain.linearRampToValueAtTime(0, t + beatTime * 0.95);
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(t);
+      osc.stop(t + beatTime);
+    });
+
+    // Arpeggio (sine wave, very soft, only in certain sections)
+    arpPattern.forEach((freq, i) => {
+      if (freq === 0) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq * 2;
+      const t = startTime + i * (beatTime / 2);
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.015, t + 0.03);
+      gain.gain.linearRampToValueAtTime(0, t + beatTime / 2 - 0.05);
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(t);
+      osc.stop(t + beatTime / 2);
+    });
+
+    // Bass (triangle, slow)
+    bassPattern.forEach((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      const t = startTime + i * (loopDuration / 16);
+      const dur = loopDuration / 16;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.05, t + 0.3);
+      gain.gain.setValueAtTime(0.05, t + dur - 0.5);
+      gain.gain.linearRampToValueAtTime(0, t + dur);
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(t);
+      osc.stop(t + dur);
+    });
+  }
+
+  let nextLoopTime = audioCtx.currentTime + 0.1;
+  scheduleLoop(nextLoopTime);
+
+  function scheduler() {
+    if (!musicPlaying) return;
+    if (audioCtx.currentTime > nextLoopTime - 1) {
+      nextLoopTime += loopDuration;
+      scheduleLoop(nextLoopTime);
+    }
+    requestAnimationFrame(scheduler);
+  }
+  scheduler();
+}
+
+document.getElementById('musicToggle').addEventListener('click', function() {
+  if (!musicPlaying) {
+    musicPlaying = true;
+    startMusic();
+    this.classList.add('active');
+  } else {
+    musicPlaying = false;
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    this.classList.remove('active');
+  }
+});
+</script>
+</body>
+</html>
