@@ -24,6 +24,7 @@
   <button data-weather="rain">🌧</button>
   <button data-weather="storm">⛈</button>
   <button id="flockBtn">V</button>
+  <button id="monkeyBtn">🐒</button>
 </div>
 <div class="music-btn">
   <button id="musicToggle">♪</button>
@@ -2190,6 +2191,25 @@ document.querySelector('.weather-btns').addEventListener('click', e => {
 
 document.getElementById('flockBtn').addEventListener('click', () => {
   spawnFlock();
+});
+
+document.getElementById('monkeyBtn').addEventListener('click', () => {
+  // Bypass maturity gate for manual trigger
+  const matureTrees = plants.filter(p => p.type === 'tree' && p.done);
+  if (matureTrees.length < 3) return;
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const startX = dir === 1 ? -5 : W + 5;
+  const sorted = matureTrees
+    .filter(t => dir === 1 ? t.x > 0 : t.x < W)
+    .sort((a, b) => dir === 1 ? a.x - b.x : b.x - a.x);
+  if (sorted.length < 2) return;
+  const firstTree = sorted[0];
+  animals.push({
+    type: 'monkey', x: startX, y: firstTree.ground - firstTree.height, dir,
+    state: 'swinging', gripX: startX, gripY: firstTree.ground - firstTree.height,
+    nextGripX: firstTree.x, nextGripY: firstTree.ground - firstTree.height,
+    swingFrame: 0, swingTotal: 10, pauseTimer: 0, life: 9999,
+  });
 });
 
 render();
